@@ -58,4 +58,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
     --vllm_device "cuda:4" \
     --vllm_gpu_memory_utilization 0.7 \
     --deepspeed ${DS_CONFIG} \
+    --video_ktr false \
     2>&1 | tee "${OUTPUT_DIR}/training_log.txt"

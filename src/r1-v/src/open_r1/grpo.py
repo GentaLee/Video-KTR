@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from datasets import load_dataset, load_from_disk
 from transformers import Qwen2VLForConditionalGeneration
 
-from trainer import Qwen2VLGRPOTrainer, Qwen2VLGRPOVLLMTrainerModified
+if __package__:
+    from .trainer import Qwen2VLGRPOTrainer
+else:  # Script-path invocation used by the upstream launchers.
+    from trainer import Qwen2VLGRPOTrainer
 from trl import GRPOConfig, GRPOTrainer, ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
 from datasets import Dataset, DatasetDict
@@ -78,7 +83,43 @@ class GRPOScriptArguments(ScriptArguments):
     )
     output_selected_token: Optional[bool] = field(
         default=False,
-        metadata={"help": "temporal-aware ratio"}
+        metadata={"help": "write a bounded JSONL sample of E/V/T/union tokens per rank"},
+    )
+    token_record_limit: Optional[int] = field(
+        default=16,
+        metadata={"help": "maximum union-selected token examples saved for each completion"},
+    )
+    data_root: Optional[str] = field(
+        default=None,
+        metadata={"help": "absolute root containing paths recorded in dataset_name"},
+    )
+    nframes: Optional[int] = field(
+        default=8,
+        metadata={"help": "fixed frame count for video inputs; must be at least two for KTR"},
+    )
+    selection_mode: Optional[str] = field(
+        default="paper",
+        metadata={"help": "KTR selection protocol: paper (absolute) or repo (signed legacy)"},
+    )
+    selection_scope: Optional[str] = field(
+        default=None,
+        metadata={"help": "KTR ranking scope: per_completion or batch; default depends on mode"},
+    )
+    temporal_permutations: Optional[int] = field(
+        default=5,
+        metadata={"help": "number of distinct non-identity frame-order probes for KTR"},
+    )
+    temporal_include_reverse: Optional[bool] = field(
+        default=True,
+        metadata={"help": "include reverse frame order among KTR temporal probes"},
+    )
+    temporal_seed: Optional[int] = field(
+        default=43,
+        metadata={"help": "base seed for reproducible KTR temporal permutations"},
+    )
+    skip_final_model_save: Optional[bool] = field(
+        default=False,
+        metadata={"help": "smoke-only option: do not write the final full model checkpoint"},
     )
 
 
@@ -207,6 +248,38 @@ SYSTEM_PROMPT = (
 
 
 def main(script_args, training_args, model_args):
+    # The shared direct implementation is selected explicitly for KTR, or for
+    # a baseline that supplies ``data_root`` so it can use the same safe media
+    # loader as KTR.  Keep a plain upstream baseline (``video_ktr=false`` and
+    # no data root) on the original trainer instead of silently changing its
+    # launcher semantics.
+    direct_video_mode = bool(script_args.video_ktr or script_args.data_root)
+    if training_args.use_vllm and direct_video_mode:
+        raise ValueError(
+            "Video-KTR and the comparable direct baseline require the direct "
+            "trainer path. The checked-in vLLM trainer does not apply E/V/T token masks."
+        )
+    if direct_video_mode:
+        root_text = script_args.data_root or os.environ.get("VIDEO_ROOT")
+        if not root_text:
+            raise ValueError(
+                "direct Video-KTR/baseline requires --data_root (or VIDEO_ROOT) "
+                "so media paths are resolved without a fallback"
+            )
+        if training_args.per_device_train_batch_size != 1:
+            raise ValueError(
+                "the direct Video-KTR/baseline trainer requires --per_device_train_batch_size 1"
+            )
+        if training_args.num_generations < 2:
+            raise ValueError("GRPO requires --num_generations >= 2")
+    if script_args.video_ktr:
+        if script_args.nframes is None or script_args.nframes < 2:
+            raise ValueError("Video-KTR requires --nframes >= 2")
+        if script_args.temporal_permutations is None or script_args.temporal_permutations < 1:
+            raise ValueError("Video-KTR requires --temporal_permutations >= 1")
+        if script_args.token_record_limit is None or script_args.token_record_limit < 0:
+            raise ValueError("--token_record_limit must be non-negative")
+
     # Get reward functions
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
 
@@ -303,7 +376,27 @@ def main(script_args, training_args, model_args):
     dataset = dataset.map(make_conversation_image_and_video)
 
     
-    trainer_cls = Qwen2VLGRPOTrainer if not training_args.use_vllm else Qwen2VLGRPOVLLMTrainerModified
+    if direct_video_mode:
+        # Keep this import lazy: an ordinary upstream baseline must not need
+        # the KTR helper module or repository-root PYTHONPATH entries.
+        if __package__:
+            from .trainer.video_ktr_grpo_trainer import VideoKTRGRPOTrainer
+        else:
+            from trainer.video_ktr_grpo_trainer import VideoKTRGRPOTrainer
+
+        trainer_cls = VideoKTRGRPOTrainer
+    elif training_args.use_vllm:
+        # Importing the optional vLLM trainer eagerly would import the host's
+        # vLLM package even for direct KTR runs.  The H200 image's editable
+        # vLLM expects a newer Transformers than this checkpoint supports.
+        if __package__:
+            from .trainer.vllm_grpo_trainer_modified import Qwen2VLGRPOVLLMTrainerModified
+        else:
+            from trainer.vllm_grpo_trainer_modified import Qwen2VLGRPOVLLMTrainerModified
+
+        trainer_cls = Qwen2VLGRPOVLLMTrainerModified
+    else:
+        trainer_cls = Qwen2VLGRPOTrainer
     print("using: ", trainer_cls)
 
     # Initialize the GRPO trainer
@@ -322,14 +415,42 @@ def main(script_args, training_args, model_args):
     
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
-        trainer.train(resume_from_checkpoint=checkpoint)
+        train_output = trainer.train(resume_from_checkpoint=checkpoint)
     else:
-        trainer.train()
+        train_output = trainer.train()
 
-    # Save and push to hub
-    trainer.save_model(training_args.output_dir)
-    if training_args.push_to_hub:
-        trainer.push_to_hub(dataset_name=script_args.dataset_name)
+    # Smoke must exercise forward/backward/optimizer without unconditionally
+    # writing a 7B checkpoint.  Full runs retain the original save behavior.
+    if not script_args.skip_final_model_save:
+        trainer.save_model(training_args.output_dir)
+        if training_args.push_to_hub:
+            trainer.push_to_hub(dataset_name=script_args.dataset_name)
+
+    if trainer.is_world_process_zero():
+        completion = {
+            "completed_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "global_step": int(trainer.state.global_step),
+            "train_metrics": dict(train_output.metrics),
+            # ``Trainer`` clears its rolling log cache after every report.  Keep
+            # the final distributed GRPO/KTR statistics explicitly so resource
+            # summaries can compare baseline and E∪V∪T runs without parsing a
+            # terminal log.
+            "latest_step_metrics": dict(getattr(trainer, "latest_step_metrics", {})),
+            "video_ktr": bool(script_args.video_ktr),
+            "selection_mode": script_args.selection_mode,
+            "selection_scope": script_args.selection_scope,
+            "temporal_permutations": script_args.temporal_permutations,
+            "skip_final_model_save": bool(script_args.skip_final_model_save),
+            "dataset_name": script_args.dataset_name,
+            "data_root": script_args.data_root,
+            "model_name_or_path": model_args.model_name_or_path,
+        }
+        completion_path = Path(training_args.output_dir) / "training_complete.json"
+        completion_path.parent.mkdir(parents=True, exist_ok=True)
+        completion_path.write_text(
+            json.dumps(completion, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"[grpo] wrote completion record: {completion_path}", flush=True)
 
 
 if __name__ == "__main__":

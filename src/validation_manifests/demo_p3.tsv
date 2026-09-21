@@ -1,0 +1,2 @@
+# case_id<TAB>video_path (relative to repo or VIDEO_ROOT)<TAB>question
+demo-energy	src/example_video/video1.mp4	Which move motion in the video lose the system energy?

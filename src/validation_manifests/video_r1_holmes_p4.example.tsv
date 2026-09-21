@@ -1,0 +1,6 @@
+# This is an example only. Set VIDEO_ROOT to the mounted/unzipped Video-R1-data
+# directory before using it. The media are not present in this checkout.
+# case_id<TAB>video_path relative to VIDEO_ROOT<TAB>question
+holmes-10648	STAR/D98TV.mp4	Which object did the person take after they put down the bag? Options: A. The pillow. B. The sandwich. C. The food. D. The picture.
+holmes-10895	CLEVRER/train_videos/video_01805.mp4	If the cube is removed, which event will not happen? Options: A. The sphere collides with the gray cylinder. B. The gray cylinder collides with the red cylinder. C. The sphere collides with the red object.
+holmes-12788	PerceptionTest/video_4859.mp4	What action or actions did the person fail to complete and why? Options: A. The person tried to pour water, but failed because the container is empty or almost empty and it has a cap on. B. The person tried to pour water, but failed because the container is empty or almost empty. C. The person tried to pour water, but failed because the container has a cap on.

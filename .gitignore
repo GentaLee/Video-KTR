@@ -2,3 +2,16 @@ baseline*
 src/r1-v/*log*
 __pycache__
 *.txt
+
+# Local, GPU-specific smoke-test runtime assets.  They are reproducible from
+# the launcher and must not be committed with source changes.
+.python-packages/
+.python-packages-grpo/
+.venv-gpu-smoke/
+.venv-grpo/
+.wheelhouse/
+.wheelhouse-grpo/
+.pip-cache-grpo/
+.tmp-pip-grpo/
+artifacts/
+.video-ktr.env

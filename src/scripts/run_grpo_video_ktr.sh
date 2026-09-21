@@ -1,5 +1,8 @@
 export DEBUG_MODE="true" # Enable Debug if you want to see the rollout of model during RL
 export LOG_PATH="./debug_log_2b.txt"
+# The README places the dataset here when this script is invoked from src/r1-v.
+# Override DATA_ROOT for another mounted dataset location.
+data_root="${DATA_ROOT:-./Video-R1-data}"
 
 # For resume training:  --resume_from_checkpoint Model_Path \
 # Set temporal to choose between T-GRPO and GRPO, and len_control to enable or disable the length control reward.
@@ -15,6 +18,7 @@ torchrun --nproc_per_node="8" \
     --output_dir "./debug" \
     --model_name_or_path 'Video-R1/Qwen2.5-VL-7B-COT-SFT' \
     --dataset_name "./video_ktr_data/Video-R1-Holmes-16k.json" \
+    --data_root "${data_root}" \
     --deepspeed local_scripts/zero3.json \
     --max_prompt_length 16384 \
     --max_completion_length 768 \

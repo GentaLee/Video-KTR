@@ -175,6 +175,12 @@ class Qwen2VLGRPOTrainer(Trainer):
         self.temporal_ratio = script_args.temporal_ratio
         self.output_selected_token = script_args.output_selected_token
         self.temporal = script_args.temporal
+        # The direct Video-KTR subclass prepares media itself and must carry
+        # the exact pixel bounds passed by the launcher into every processor
+        # invocation.  The original trainer only used these values while
+        # initializing its processor, leaving no reusable attribute.
+        self.max_pixels = max_pixels
+        self.min_pixels = min_pixels
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
