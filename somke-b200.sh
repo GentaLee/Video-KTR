@@ -281,7 +281,7 @@ require_path() {
     fi
 }
 
-log "phase 1/6: validating B200 host, durable inputs, and local runtime"
+log "phase 1/7: validating B200 host, durable inputs, and local runtime"
 if [[ "${allow_pause}" != "1" ]]; then
     log "ERROR: set B200_ALLOW_PAUSE_KEEPALIVE=1 only when you intend this smoke to pause and later restore the known keep-alive"
     exit 2
@@ -337,7 +337,7 @@ export SETUPTOOLS_USE_DISTUTILS=local
 # platform Transformers build that differs from the runtime we launch.
 export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/open_r1:${project_root}/src/r1-v/src:${project_root}/src/qwen-vl-utils/src"
 export MODEL_PATH="${model_path}"
-log "phase 2/6: checking pinned imports, FlashAttention-2 availability, and distinct Qwen media IDs"
+log "phase 2/7: checking pinned imports, FlashAttention-2 availability, and distinct Qwen media IDs"
 "${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
 import os
 from importlib import metadata
@@ -391,7 +391,10 @@ PY
 # beneath the Python ``flash_attn`` package.  Resolve it through the module
 # loader so an isolated runtime bridge cannot make this gate miss a valid FA2
 # binary (or pass against a different package directory).
-flash_binary="$("${python_bin}" -c 'import flash_attn_2_cuda; print(flash_attn_2_cuda.__file__)')"
+# FA2's extension links against libtorch.  Import torch first so its shared
+# libraries are loaded before resolving the top-level FA2 extension in this
+# short standalone subprocess; the main Python preflight already does this.
+flash_binary="$("${python_bin}" -c 'import torch; import flash_attn_2_cuda; print(flash_attn_2_cuda.__file__)')"
 if [[ -z "${flash_binary}" ]] || ! strings "${flash_binary}" | grep -q 'sm_100'; then
     log "ERROR: installed FlashAttention-2 binary does not advertise sm_100; do not silently fall back to a different attention backend"
     exit 2
@@ -409,7 +412,7 @@ log "FlashAttention-2 binary advertises sm_100: ${flash_binary}"
     printf 'delegate_sha256=%s\n' "$(sha256sum "${project_root}/smoke.sh" | awk '{print $1}')"
 } > "${run_root}/b200_profile.txt"
 
-log "phase 3/6: validating the known keep-alive before pausing it"
+log "phase 3/7: validating the known keep-alive before pausing it"
 find_keepalive_pids
 if (( ${#keepalive_pids[@]} == 0 )); then
     log "keep-alive is not running; starting it through the official controller before lifecycle validation"
@@ -422,7 +425,7 @@ else
 fi
 capture_keepalive_identity
 
-log "phase 4/6: stopping keep-alive through its official controller; it remains paused only while smoke work owns the GPUs"
+log "phase 4/7: stopping keep-alive through its official controller; it remains paused only while smoke work owns the GPUs"
 if ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_ticks}"; then
     log "ERROR: keep-alive PID identity changed before official stop; refusing to manage it"
     exit 2
