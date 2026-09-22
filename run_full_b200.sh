@@ -655,6 +655,10 @@ export TOKENIZERS_PARALLELISM=false
 export FORCE_QWENVL_VIDEO_READER=torchvision
 export SETUPTOOLS_USE_DISTUTILS=local
 export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/open_r1:${project_root}/src/r1-v/src:${project_root}/src/qwen-vl-utils/src"
+# torch.distributed.run honors an inherited PYTHON_EXEC for its workers.  A
+# platform-level override can silently launch /opt/venv workers even though
+# the torchrun parent and runtime gate use our pinned project venv.
+export PYTHON_EXEC="${python_bin}"
 export MODEL_PATH="${model_path}"
 
 triton_cuda_include_dir="${TRITON_CUDA_INCLUDE_DIR:-}"
@@ -773,6 +777,16 @@ then
     exit 2
 fi
 log "FA2 B200 binary and runtime bridge passed; Triton cache=${triton_cache_dir}"
+run_logged_preflight "eight-rank CPU-only training-entrypoint import gate" \
+    env CUDA_VISIBLE_DEVICES="" \
+    "${python_bin}" -u -m torch.distributed.run \
+    --standalone \
+    --nproc_per_node=8 \
+    --log-dir "${run_root}/import-gate-logs" \
+    --tee 3 \
+    "${project_root}/src/grpo_validate_b200_training_import.py" \
+    --expected-python "${python_bin}" \
+    --entrypoint "${project_root}/src/r1-v/src/open_r1/grpo.py"
 
 log "phase 3/8: validating the passed B200 smoke and current critical training-source hashes"
 run_logged_preflight "B200 smoke provenance gate" \
@@ -868,7 +882,8 @@ write_source_provenance "${run_root}/source_provenance.txt"
     printf 'dataset_source=%s\npath_dataset=%s\ntraining_dataset_json=%s\n' "${dataset_source}" "${path_dataset}" "${training_dataset_json}"
     printf 'smoke_root=%s\nsmoke_gate=%s\nsmoke_gate_pre_gpu=%s\nruntime_gate=%s\nruntime_gate_pre_gpu=%s\ndata_gate=%s\n' \
         "${smoke_root}" "${smoke_gate}" "${smoke_gate_pre_gpu}" "${runtime_gate}" "${runtime_gate_pre_gpu}" "${data_gate}"
-    printf 'model_integrity_manifest=%s\nenvironment_manifest=%s\n' "${model_integrity_manifest}" "${environment_manifest}"
+    printf 'model_integrity_manifest=%s\nenvironment_manifest=%s\npython_bin=%s\npython_exec=%s\n' \
+        "${model_integrity_manifest}" "${environment_manifest}" "${python_bin}" "${PYTHON_EXEC}"
     printf 'nproc_per_node=8\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\n'
     printf 'requested_cli_max_pixels=401408\nqwen_file_video_effective_cap=105369\nobserved_smoke_video_pixels=94080-98784\nnframes=8\n'
     printf 'media_decode_workers=%s\nmedia_decode_timeout_seconds=%s\n' "${decoder_workers}" "${decoder_timeout_seconds}"
@@ -1058,6 +1073,13 @@ log "writing duration, memory, utilization, and final-step summary"
 write_summary
 if (( training_exit != 0 )); then
     log "full ${variant} training failed with exit=${training_exit}"
+    for rank_log in "${run_root}"/torchrun-logs/*/attempt_*/*/stderr.log; do
+        if [[ -s "${rank_log}" ]] && grep -Eiq 'Traceback|Error|Exception' "${rank_log}"; then
+            log "first worker traceback: ${rank_log}"
+            tail -n 80 "${rank_log}" | tee -a "${run_root}/terminal.log"
+            break
+        fi
+    done
     exit "${training_exit}"
 fi
 if [[ ! -f "${run_root}/training/training_complete.json" ]]; then

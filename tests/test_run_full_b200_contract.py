@@ -101,6 +101,18 @@ class B200FullLauncherContractTests(unittest.TestCase):
         self.assertIn("image_id == video_id", LAUNCHER)
         self.assertIn('b"sm_100"', LAUNCHER)
 
+    def test_training_entrypoint_imports_on_eight_cpu_only_ranks_before_data_work(self) -> None:
+        self.assertIn("eight-rank CPU-only training-entrypoint import gate", LAUNCHER)
+        self.assertIn('env CUDA_VISIBLE_DEVICES=""', LAUNCHER)
+        self.assertIn("grpo_validate_b200_training_import.py", LAUNCHER)
+        self.assertIn('export PYTHON_EXEC="${python_bin}"', LAUNCHER)
+        self.assertIn('--expected-python "${python_bin}"', LAUNCHER)
+        self.assertLess(
+            LAUNCHER.index("eight-rank CPU-only training-entrypoint import gate"),
+            LAUNCHER.index("phase 5/8: path-verifying"),
+        )
+        self.assertIn("first worker traceback", LAUNCHER)
+
     def test_smoke_confirms_pause_before_marking_keepalive_paused(self) -> None:
         """A failed controller stop must be reconciled before cleanup restores."""
         stop_request = SMOKE_LAUNCHER.index("keepalive_stop_requested=1")

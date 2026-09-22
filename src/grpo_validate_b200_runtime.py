@@ -12,6 +12,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -147,8 +148,10 @@ def observed_runtime() -> tuple[dict[str, str], dict[str, str]]:
         "deepspeed": deepspeed.__version__,
     }
     locations = {
-        "python_executable": str(Path(sys.executable).resolve()),
-        "venv": str(Path(sys.prefix).resolve()),
+        # Keep the invoked venv path: both /opt/venv/bin/python and the
+        # project venv resolve to /usr/bin/python3.12 on this image.
+        "python_executable": os.path.abspath(sys.executable),
+        "venv": os.path.abspath(sys.prefix),
         "torch_file": str(Path(torch.__file__).resolve()),
         "torchvision_file": str(Path(torchvision.__file__).resolve()),
         "torch_cuda": str(torch.version.cuda),
@@ -178,6 +181,21 @@ def validate_environment_identity(environment_manifest_path: Path, project_root:
         "environment manifest torchvision", torchvision_payload.get("version"), observed["torchvision"]
     )
     require_equal("environment manifest torch CUDA", torch_payload.get("cuda"), locations["torch_cuda"])
+    require_equal(
+        "environment manifest venv",
+        os.path.abspath(str(manifest.get("venv", ""))),
+        locations["venv"],
+    )
+    require_equal(
+        "environment manifest torch location",
+        str(Path(str(torch_payload.get("file", ""))).resolve()),
+        locations["torch_file"],
+    )
+    require_equal(
+        "environment manifest torchvision location",
+        str(Path(str(torchvision_payload.get("file", ""))).resolve()),
+        locations["torchvision_file"],
+    )
 
     manifest_repo = manifest.get("repo_root")
     if not isinstance(manifest_repo, str):
@@ -194,7 +212,7 @@ def validate_environment_identity(environment_manifest_path: Path, project_root:
         require_equal("environment manifest Python", manifest_python.get("version"), observed["python"])
         require_equal(
             "environment manifest Python executable",
-            str(Path(str(manifest_python.get("executable", ""))).resolve()),
+            os.path.abspath(str(manifest_python.get("executable", ""))),
             locations["python_executable"],
         )
     else:
@@ -205,7 +223,7 @@ def validate_environment_identity(environment_manifest_path: Path, project_root:
             raise RuntimeError("legacy B200 environment manifest has no python_executable")
         require_equal(
             "legacy environment manifest Python executable",
-            str(Path(manifest_executable).resolve()),
+            os.path.abspath(manifest_executable),
             locations["python_executable"],
         )
     return {

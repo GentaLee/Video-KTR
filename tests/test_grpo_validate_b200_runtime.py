@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,45 @@ def make_manifest(files: dict[str, bytes]) -> dict[str, object]:
 
 
 class B200RuntimeGateTests(unittest.TestCase):
+    def test_runtime_gate_rejects_platform_venv_even_if_python_binary_resolves_identically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            project_venv = temporary / "project-venv"
+            platform_venv = temporary / "platform-venv"
+            for venv in (project_venv, platform_venv):
+                (venv / "bin").mkdir(parents=True)
+                (venv / "bin" / "python").symlink_to(sys.executable)
+            self.assertEqual(
+                (project_venv / "bin" / "python").resolve(),
+                (platform_venv / "bin" / "python").resolve(),
+            )
+            bridge_torch = temporary / "bridge" / "torch.py"
+            bridge_vision = temporary / "bridge" / "torchvision.py"
+            bridge_torch.parent.mkdir()
+            bridge_torch.touch()
+            bridge_vision.touch()
+            manifest = {
+                "schema": validator.EXPECTED_ENVIRONMENT_SCHEMA,
+                "repo_root": str(temporary),
+                "python_executable": str(project_venv / "bin" / "python"),
+                "venv": str(project_venv),
+                "versions": {"av": validator.EXPECTED_RUNTIME["av"], "deepspeed": validator.EXPECTED_RUNTIME["deepspeed"]},
+                "torch": {"version": validator.EXPECTED_RUNTIME["torch"], "cuda": "13.1", "file": str(bridge_torch)},
+                "torchvision": {"version": validator.EXPECTED_RUNTIME["torchvision"], "file": str(bridge_vision)},
+            }
+            manifest_path = temporary / "environment.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            locations = {
+                "python_executable": str(platform_venv / "bin" / "python"),
+                "venv": str(platform_venv),
+                "torch_file": str(bridge_torch),
+                "torchvision_file": str(bridge_vision),
+                "torch_cuda": "13.1",
+            }
+            with mock.patch.object(validator, "observed_runtime", return_value=(validator.EXPECTED_RUNTIME, locations)):
+                with self.assertRaisesRegex(RuntimeError, "environment manifest venv mismatch"):
+                    validator.validate_environment_identity(manifest_path, temporary)
+
     def test_pinned_manifest_is_path_free_and_has_expected_shape(self) -> None:
         manifest = writer.load_model_manifest(PINNED_MANIFEST)
         self.assertEqual(manifest["schema"], writer.MODEL_MANIFEST_SCHEMA)
