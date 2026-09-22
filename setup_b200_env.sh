@@ -16,6 +16,9 @@
 # Optional:
 #   B200_BASE_PYTHON          defaults to /opt/venv/bin/python
 #   B200_ENV_MANIFEST         defaults to $B200_ROOT/environment-manifest.json
+#   B200_ENV_GPU_RUNTIME_CHECK defaults to 1; set to 0 only when provisioning
+#                              on an occupied GPU node and defer the FA2
+#                              kernel exercise to somke-b200.sh.
 
 set -Eeuo pipefail
 
@@ -72,6 +75,9 @@ mount_type="$(findmnt -T "${b200_root}" -no FSTYPE 2>/dev/null | tr -d '[:space:
 
 base_python="${B200_BASE_PYTHON:-/opt/venv/bin/python}"
 [[ -x "${base_python}" ]] || die "B200 base Python is unavailable: ${base_python}"
+gpu_runtime_check="${B200_ENV_GPU_RUNTIME_CHECK:-1}"
+[[ "${gpu_runtime_check}" == "0" || "${gpu_runtime_check}" == "1" ]] \
+    || die "B200_ENV_GPU_RUNTIME_CHECK must be 0 or 1, got '${gpu_runtime_check}'"
 
 venv_dir="${b200_root}/venv"
 venv_python="${venv_dir}/bin/python"
@@ -268,6 +274,7 @@ export B200_ENV_COMPAT_WHEELHOUSE="${compat_wheelhouse}"
 export B200_ENV_GRPO_WHEELHOUSE="${grpo_wheelhouse}"
 export B200_ENV_GPU_MODE="${gpu_mode}"
 export B200_ENV_PLATFORM_PREFIX="${platform_prefix}"
+export B200_ENV_GPU_RUNTIME_CHECK="${gpu_runtime_check}"
 
 log "running import, pinned-version, vendored-source, and FlashAttention-2 gates"
 "${venv_python}" - <<'PY'
@@ -303,6 +310,7 @@ from open_r1.trainer.video_ktr_grpo_trainer import VideoKTRGRPOTrainer
 venv_dir = Path(os.environ["B200_ENV_VENV_DIR"]).resolve()
 repo_root = Path(os.environ["B200_ENV_REPO_ROOT"]).resolve()
 gpu_mode = os.environ["B200_ENV_GPU_MODE"] == "1"
+gpu_runtime_check = os.environ["B200_ENV_GPU_RUNTIME_CHECK"] == "1"
 manifest_path = Path(os.environ["B200_ENV_MANIFEST_PATH"])
 platform_prefix = Path(os.environ["B200_ENV_PLATFORM_PREFIX"]).resolve()
 
@@ -385,16 +393,19 @@ if gpu_mode:
             raise SystemExit(f"GPU {index} is not expected B200 sm_100 hardware: {name}, capability={capability}")
         cuda["devices"].append({"index": index, "name": name, "capability": list(capability)})
 
-    # This intentionally tiny forward/backward proves that the inherited
-    # FA2 extension can execute on sm_100, instead of merely being importable.
-    from flash_attn import flash_attn_func
-    q = torch.randn((1, 32, 2, 64), device="cuda:0", dtype=torch.bfloat16, requires_grad=True)
-    k = torch.randn_like(q, requires_grad=True)
-    v = torch.randn_like(q, requires_grad=True)
-    out = flash_attn_func(q, k, v, causal=False)
-    out.float().square().mean().backward()
-    torch.cuda.synchronize(0)
-    fa2_proofs.append("sm_100-runtime-forward-backward")
+    if gpu_runtime_check:
+        # This intentionally tiny forward/backward proves that the inherited
+        # FA2 extension can execute on sm_100, instead of merely being importable.
+        from flash_attn import flash_attn_func
+        q = torch.randn((1, 32, 2, 64), device="cuda:0", dtype=torch.bfloat16, requires_grad=True)
+        k = torch.randn_like(q, requires_grad=True)
+        v = torch.randn_like(q, requires_grad=True)
+        out = flash_attn_func(q, k, v, causal=False)
+        out.float().square().mean().backward()
+        torch.cuda.synchronize(0)
+        fa2_proofs.append("sm_100-runtime-forward-backward")
+    else:
+        fa2_proofs.append("sm_100-runtime-deferred-to-smoke")
 
 if not fa2_proofs:
     raise SystemExit(
@@ -449,6 +460,7 @@ payload = {
         "qwen_vl_utils": qwen_vl_utils.__file__,
     },
     "cuda": cuda,
+    "gpu_runtime_check": gpu_runtime_check,
     "wheelhouses": {
         "compat": wheelhouse_manifest(Path(os.environ["B200_ENV_COMPAT_WHEELHOUSE"])),
         "grpo": wheelhouse_manifest(Path(os.environ["B200_ENV_GRPO_WHEELHOUSE"])),
