@@ -332,6 +332,7 @@ require_path "venv site-packages" "${site_dir}"
 
 export PYTHONNOUSERSITE=1
 export SETUPTOOLS_USE_DISTUTILS=local
+export FORCE_QWENVL_VIDEO_READER=torchvision
 # Python consults PYTHONPATH before site-packages.  Put the pinned venv first
 # and discard any inherited control-plane paths so phase 2 cannot validate a
 # platform Transformers build that differs from the runtime we launch.
@@ -485,7 +486,7 @@ log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
     printf 'holmes_requested=Holmes-16k\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\nmax_pixels=401408\nnframes=8\n'
     printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\ntemporal_permutations=1\ntemporal_include_reverse=false\n'
     printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
-    printf 'image_video_token_ids=distinct\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
+    printf 'image_video_token_ids=distinct\nvideo_reader_backend=torchvision\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
     printf 'wrapper_sha256=%s\n' "$(sha256sum "${project_root}/somke-b200.sh" | awk '{print $1}')"
     printf 'delegate_sha256=%s\n' "$(sha256sum "${project_root}/smoke.sh" | awk '{print $1}')"
 } > "${run_root}/b200_profile.txt"

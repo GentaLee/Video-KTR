@@ -1,16 +1,45 @@
 # Video-KTR：E/V/T token 归因与 Direct-GRPO 验证记录
 
-更新日期：2026-09-21
+更新日期：2026-09-22
 交付分支：`<owner>/video-ktr-repro-handoff`
 
-## 1. 当前结论
+> 本文件保留的 H200 章节是故障定位历史，不能覆盖下列 B200 active profile。当前执行、交接与手动 full 命令以 [B200_REPRODUCTION.md](B200_REPRODUCTION.md) 和 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md) 为准。
+
+## 0. 当前 B200 执行计划（active）
+
+集群 3 已完成 8×B200 paired smoke；baseline/KTR 各有一次真实 optimizer step，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测与保活恢复均为 PASS。full 尚未执行，且必须由操作者手动启动。
+
+| 阶段 | 状态 | 可复查证据 / 下一步 |
+| --- | --- | --- |
+| B200 isolated venv / runtime bridge | 已验证 | pinned Transformers/TRL/DeepSpeed + B200 FA2 `sm_100` gate；CUDA headers、`ptxas` 和持久 Triton cache 已配置 |
+| 模型身份 | 已验证 | Qwen2.5-VL-7B-COT-SFT 的 4 个 safetensors weight shard SHA-256 已比对 |
+| B200 paired smoke | 已通过 | 8 ranks、prompt=16384、completion=768、G=8、FA2、8 帧；baseline 94.840 s，KTR 95.008 s |
+| selector 语义 | 已通过 | `paper/per_completion`、每 completion 精确 top-20%、absolute delta、每 rank/step 单个非恒等置换、分离 image/video token ID |
+| Holmes path 数据 | 当前降级可用 | `15,365 / 16,916`（8765 image + 6600 video）；缺 1551 video，strict full 默认拒绝 |
+| mixed media decode | full 前门禁已实现 | CPU-only、spawned worker、硬超时、实时 ETA；decoder rejection 默认拒绝 |
+| B200 full KTR / baseline | 待操作者启动 | 使用 `run_full_b200.sh`；两个 variant 需串行运行并比较 artifact |
+
+严格 full（数据补齐后）只需显式授权保活生命周期；当前数据则还必须显式承认 reduced：
+
+```bash
+# strict：仅当 16,916 条媒体均可用且 decode=0 rejection 时才会通过
+B200_ALLOW_PAUSE_KEEPALIVE=1 VARIANT=ktr ./run_full_b200.sh
+
+# 当前可运行，但输出会标为 reproduction_class=reduced-media-subset
+B200_ALLOW_PAUSE_KEEPALIVE=1 B200_ALLOW_REDUCED_HOLMES=1 \
+  VARIANT=ktr ./run_full_b200.sh
+```
+
+`--max_pixels 401408` 保持为上游请求值；随仓库的 Qwen 文件型视频预处理实际单帧上限约 105369，因此 B200 profile 同时记录 requested/effective/observed 值，不能把 CLI 值误报为实际逐帧分辨率。
+
+## 1. 历史 4×H200 结论（归档，不是当前执行路径）
 
 本轮工作已经从“只展示三类 token”扩展为两层可复现验证：
 
 1. 对实际生成的 CoT 按高熵（E）、视觉敏感（V）、时序敏感（T）筛选 token，并保存可读上下文。
 2. 在不使用 vLLM 的 direct GRPO 路径中，仅让 `E ∪ V ∪ T` 进入 policy 与 KL token loss；同时运行不加该掩码的 baseline，以便比较训练时长、显存与 GPU 利用率。
 
-4 张 H200 的真实 direct-GRPO smoke 已通过；**不需要切换到 8 张 B200**。完整视频数据的 full run 已准备好，但按约定只由操作者在 GPU 机器手动启动。
+4 张 H200 的真实 direct-GRPO smoke 已通过，但它存在历史 selector/FA2/profile 偏差，且旧 full 有 collective 故障；它只保留作定位证据。当前已切换到上方 8×B200 active profile，full 仍按约定仅由操作者手动启动。
 
 | 阶段 | 状态 | 证据 / 下一步 |
 | --- | --- | --- |
@@ -24,7 +53,7 @@
 
 这里的 smoke 只证明链路、资源配置和一小步更新可执行；它不等同于完整训练收敛、任务正确率或跨数据集泛化结论。
 
-## 2. 方法与实际运行 profile
+## 2. 历史 H200 方法与运行 profile（归档）
 
 当前可运行 profile 使用每个 prompt `G=4` 个 completion（不是概念图中的旧 `G=8`），并将同一条生成结果用于原始与 counterfactual teacher-forcing：
 
@@ -72,7 +101,7 @@ U   = top20%(E) ∪ top20%(V) ∪ top20%(T)
 
 当前 host 上 FlashAttention2 与该 Transformers/Qwen mRoPE 组合会出现 `float32`/`bfloat16` rotary dtype 断言；`sdpa` 已由真实 smoke 验证。因此这是兼容性选择，并非 H200 容量不足。
 
-## 3. 已验证环境、数据与容量
+## 3. 历史 H200 环境、数据与容量（归档）
 
 | 项目 | 已验证状态 |
 | --- | --- |
@@ -86,7 +115,7 @@ U   = top20%(E) ∪ top20%(V) ∪ top20%(T)
 
 容量结论应基于实测而非估算：在与 full 相同的 completion=512、5 次时序置换 profile 下，KTR 的单卡峰值为 92,197 MiB，距 H200 物理容量约有 51.6 GiB；full 脚本仍要求每张卡在启动前至少有 120 GiB 空闲，并在每次运行时重新检查。该证据足以支持 4×H200 启动 full，但仍不把单步 smoke 外推为完整 epoch 的无条件稳定性保证。
 
-8×B200 没有被切换：已提供独立的 `setup_b200_env.sh` 与 `somke-b200.sh`，用于 GPFS 上隔离环境、FlashAttention2 `sm_100` gate 与 8-rank smoke，但它们目前只通过静态检查，尚未在候选节点完成真实硬件验证。当前 `run_full.sh` 仍会明确拒绝静默把已验证的 H200 profile 换成 B200。
+这段 H200 容量结论不再决定当前方案：8×B200 已完成真实硬件 paired smoke，使用独立的 `setup_b200_env.sh`、`somke-b200.sh` 与 `run_full_b200.sh`。B200 的最终状态、full 数据门禁和手动命令见 [B200_REPRODUCTION.md](B200_REPRODUCTION.md)。
 
 ## 4. 真实 smoke 结果
 

@@ -53,13 +53,13 @@ TYPE: HANDOFF
 STATUS: RUNNING
 STATE_CHANGE: NONE
 SCOPE: KTR full run
-ENV: 集群 2；branch=<owner>/video-ktr-repro-handoff；commit=<commit>；run=<run-root>；GPU 被训练独占，外部保活已暂停
-CLAIM: KTR full run 正常推进；尚未可宣称训练收敛。
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；commit=<commit>；run=<run-root>；GPU 被训练独占，外部保活已由官方 controller 暂停
+CLAIM: B200 KTR full run 正常推进；尚未可宣称训练收敛。
 EVIDENCE: 最近 heartbeat、training.log 的 step、连续 gpu_metrics.jsonl；training_complete.json 仅在结束后存在。
 CHANGES: NONE
 EXECUTED: 只读检查进程、step、显存和错误日志。
 ARTIFACTS: <run-root>/terminal.log；<run-root>/training.log；<run-root>/gpu_metrics.jsonl
-RISK / ROLLBACK: 当前 G=4，不是原始描述中的 G=8；使用 SDPA，不是 FlashAttention2；不要重复启动训练。
+RISK / ROLLBACK: 当前请求 G=8/FA2；若数据为 reduced-media-subset，不能称严格 Holmes-16k；不要重复启动训练。
 LAST_VERIFIED: <last smoke>；exit=0；<相对 artifact>/training_complete.json
 RUNNING: <run-root>；最近 step=<step>；下次检查=下一个 heartbeat 或错误关键词出现时。
 RECOVERY: bash <KEEPALIVE_LAUNCHER>（仅已确认训练停止且自动恢复失败时）
@@ -85,8 +85,8 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 | 环境 | 角色 | 已验证配置 | 使用约束 |
 | --- | --- | --- | --- |
 | 集群 1 | CPU / 联网准备端 | 有外网；与集群 2 共享持久卷 | 下载依赖、查询官方元数据、准备 wheel；不承担 GPU 训练 |
-| 集群 2 | 训练端 | 4×H200（约 143,771 MiB/卡）、Python 3.12、PyTorch 2.10 + CUDA 12.8 | 假定离线；模型、数据、overlay 从 `<共享持久卷>` 读取；full KTR 在这里运行 |
-| 集群 3 | 候选扩容端 | 8×B 系列 GPU 候选；已准备独立的 `setup_b200_env.sh` 与 `somke-b200.sh` | 脚本仅完成静态检查，尚未完成模型、数据、overlay、CUDA/FlashAttention2 的真实节点验证；不能自动切换过去 |
+| 集群 2 | 历史 H200 诊断端 | 4×H200（约 143,771 MiB/卡）、Python 3.12、PyTorch 2.10 + CUDA 12.8 | 仅保留旧 full 故障定位；不再作为 active full profile |
+| 集群 3 | active B200 训练端 | 8×B200、Python 3.12、CUDA 13.1、B200 原生 FA2、隔离 venv | `setup_b200_env.sh`、`somke-b200.sh` 已真实验证；full 只能通过 `run_full_b200.sh` 手动启动 |
 | `<共享持久卷>` | CPU/GPU 共享资产 | 项目源码、模型、Video-R1 数据、wheel/overlay、运行 artifact | 只存非机密运行资产；不要存私钥、token 或认证文件 |
 
 ### 已锁定的软件与资产
@@ -153,7 +153,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=both ./smoke.sh
 ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> ./run_full.sh
 ```
 
-## 3. 目标方法与最终实现
+## 3. 历史 H200 方法与实现记录（归档）
 
 目标流程保持如下语义：
 
@@ -195,7 +195,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | union 进入 policy + KL | `loss_mask = union_mask` 同时用于两项 | 已对齐 | direct trainer loss |
 | 更新 Qwen2.5-VL | 真正 optimizer step 和 full run | 已实现 | `global_step`、checkpoint |
 
-## 4. 已验证结果与对比表
+## 4. 历史 H200 已验证结果与对比表（归档）
 
 ### 历史 baseline 与 KTR smoke（4×H200，真实 1 optimizer step）
 
@@ -262,7 +262,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 非训练验证已通过：4 条真实视频的 tracked `PREFLIGHT_ONLY=1` 为 4/4，明确写入 `torchrun_started=false` 且结束后无 worker/GPU 残留；16 worker、32 条真实视频抽样为 32/32，无 timeout。该抽样只验证实现和隔离机制，不能外推为 116,248 条全量数据的耗时或零 rejection。
 
-## 5. 已踩坑、已验证修复与优化
+## 5. 历史 H200 已踩坑、修复与优化（归档）
 
 | 类别 | 现象 / 风险 | 已验证处理 | 结果 |
 | --- | --- | --- | --- |
@@ -285,7 +285,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | 中断安全 | 仅终止 shell 可能让 torchrun/decoder worker 继续、保活提前恢复 | launcher 跟踪 torchrun 与 import/path/decode process group；清理时先 TERM/wait，再恢复保活 | 降低 GPU 冲突风险 |
 | 环境交接 | wheelhouse/overlay 被 `.gitignore` 排除，clone 后并不天然可运行 | `setup_grpo_env.sh` 明确检查两个 wheelhouse，支持 `GRPO_WHEELHOUSE` 与 `COMPAT_WHEELHOUSE` 覆盖 | 避免同事误以为源码仓库包含全部离线依赖 |
 
-## 6. 妥协、降级路径与不可自动化的选择
+## 6. 历史 H200 妥协、降级路径与不可自动化选择（归档）
 
 ### 当前 profile 与上游 launcher 的对比
 
@@ -315,7 +315,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | 需要严格上游 8-rank/FA2/G8 | 单独准备新 profile，先做环境、显存和一 step smoke | 不是当前 full run 的恢复参数 | 修改正在跑的 run |
 | 保活恢复失败 | 仅在训练已确认停止后，使用原始保活 launcher 的人工恢复命令 | 需要在交接消息中记录 | 在 torchrun 仍运行时启动保活 |
 
-## 7. 当前运行与远程核验方式
+## 7. 历史 H200 运行与远程核验方式（归档）
 
 运行任务状态是动态信息，不能依赖聊天历史。下一位执行者首先进行只读核验：
 
@@ -342,9 +342,67 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | 训练安全 | push 不影响运行中的训练；不触碰训练/保活进程 |
 | 交接消息 | 按第 0 节模板包含分支、commit、运行状态、证据、风险和下一步 |
 
-## 9. 复现结论（截至本次交付）
+## 9. 历史 H200 复现结论（归档）
 
 1. 模型的 4 个 weight shards 已与官方 LFS SHA-256 元数据逐一匹配；config/index/processor manifest 未在本轮独立核对，因此不能据此排除全部模型相关偏差。
 2. 当前实现已真实验证 E/V/T 选择、union policy+KL、optimizer 更新、资源遥测与 CoT token 证据；修复后需重跑 paired smoke 才能给出公平的 baseline/KTR 数值比较。
 3. 旧探索性 full 已在约 step 529 因 rank 间 collective timeout 失败；最高置信推断是 rank 0 的训练前视频预处理 stall，而不是 OOM。checkpoint-500→501 的恢复已在 scoped safe-global 修复后通过，新增 decoder isolation、rank trace 和 NCCL flight recorder 后，仍须由新的短恢复跨越 step 529 实际回归验证。
 4. 后续正式 full 会有源码/数据 manifest provenance，且它**不是**上游 8-rank、G=8、16k/768、401k pixels、FlashAttention2 launcher 的严格逐参数复现。要求严格上游对齐时，必须另做 8-rank/FA2/G8 profile 的容量和兼容性 smoke。
+
+## 10. 集群 3 B200 active handoff（覆盖上方历史 H200 运行结论）
+
+本节是当前唯一可启动的 full profile。详细说明、token 例子和 artifact 树见 [B200_REPRODUCTION.md](B200_REPRODUCTION.md)；上方第 3–9 节的 H200 参数、SDPA、G=4、5 次置换和 checkpoint-500 诊断均为归档，不能复制到 B200 命令中。
+
+### 已验证状态
+
+| 项目 | 已验证事实 | 证据边界 |
+| --- | --- | --- |
+| 硬件与 runtime | 集群 3，8×B200，隔离 Python 3.12 venv，CUDA 13.1；FA2 binary 含 `sm_100` | 最终 smoke 真实执行 FA2/Qwen rotary 前反向；full epoch 未运行 |
+| 模型 | Qwen2.5-VL-7B-COT-SFT；4 个 safetensors weight shard SHA-256 已匹配 | 不把未单独重算的辅助文件伪称为独立 hash 验证 |
+| paired smoke | baseline/KTR 各 1 optimizer step，8 ranks；外层 94.840 / 95.008 s；跨卡最大显存 47,858 / 45,870 MiB | 单步容量/链路证据，不是完整 epoch 或收敛结论 |
+| selector | `paper/per_completion`、精确 top-20%、absolute delta、每 rank/step 一个非恒等置换、不含 reverse | 不等于全局所有 rank 共用同一置换 |
+| 媒体 token | `image_token_id != video_token_id`，visual positions 取两者并集 | smoke 是 8 条视频；mixed sampler 的训练覆盖留给 full |
+| Qwen FA2 兼容 | 仅在 pinned legacy Transformers + FA2 下启用上游等价 rotary dtype shim | 解析 attention 非 FA2 或 shim gate 失败即拒绝，不降到 SDPA |
+
+最终 smoke 记录的 CoT token 数为 E=341、V=592、T=472、union records=768（类别可重叠）；例子包括 E 的 ` step`/` First`、V 的 ` step`/`'ll`、T 的 ` by`/` First`。它们由分数归因选中，不是人工词性分类。
+
+### B200 实现、优化与妥协
+
+| 类别 | 最终实现 | 明确边界 |
+| --- | --- | --- |
+| 上游参数 | 8 ranks、prompt=16384、completion=768、G=8、FA2、1 epoch、save step=100 | `save_total_limit=2` 是持久存储折中，记录在 `launch_config.txt` |
+| mixed data | `grpo_prepare_dataset.py --data-type all` 后由 `grpo_verify_media_decode.py` 在 CUDA-hidden spawned CPU worker 解码 image/video，硬超时、rejections、吞吐/ETA | full 前预检可耗时；worker crash/0 条记录 fail-fast |
+| data strictness | `grpo_validate_b200_dataset.py` 固定核验 Holmes-16k 模态计数 | 当前只得到 15365/16916，默认拒绝而非静默训练 |
+| smoke lineage | `grpo_validate_b200_smoke.py` 检查成功 marker、两个 completion、profile、clean Git、smoke ancestor 和关键训练源码 SHA | launcher/文档后续提交可存在；训练关键源码变化必须重跑 smoke |
+| 保活 | 外层 `run_full_b200.sh` 使用官方 controller；CPU preflight 时保活运行，只有 GPU preflight/torchrun 时暂停 | cleanup 先停本任务、确认 GPU 空闲，再恢复且确保唯一实例；不使用 `pkill` |
+| 可观测性 | terminal.log、GPU JSONL、heartbeat、torchrun logs、source/data/smoke provenance | full 必须实际结束才可声称 `training_complete.json`/summary 成功 |
+
+`--max_pixels 401408` 保持为原始 launcher 的 CLI 请求值，但 vendored Qwen 文件型视频预处理的实际单帧上限约为 105369；最终 smoke 的观察值是 94080–98784。所有 B200 full artifact 都写入三者，不能声称实际逐帧使用 401408。若需要实际 401408，必须建独立 `patched-intent` profile、修改处理代码并重跑 smoke。
+
+### 数据门禁与手动命令
+
+当前数据状态：16,916 条 source（8,765 image + 8,151 video）；路径可用 15,365 条（8,765 image + 6,600 video），缺失 1,551 video/233 个唯一媒体路径。
+
+```bash
+# strict：仅在补齐为 16,916 且 mixed decoder 无 rejection 后通过
+cd <REPO_ROOT>
+B200_ALLOW_PAUSE_KEEPALIVE=1 \
+  VARIANT=ktr \
+  RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-<UTC> \
+  ./run_full_b200.sh
+
+# 当前可执行 reduced：明确写入 reproduction_class=reduced-media-subset
+B200_ALLOW_PAUSE_KEEPALIVE=1 \
+  B200_ALLOW_REDUCED_HOLMES=1 \
+  VARIANT=ktr \
+  RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-reduced-<UTC> \
+  ./run_full_b200.sh
+```
+
+资源对照要用同一 clean commit、同一 data gate 串行再跑 baseline；不要同时占卡。full 的 GPU 阶段成功、失败、TERM/HUP 都会自动尝试恢复保活。仅当自动恢复失败且已确认 torchrun/rank 进程完全退出时，才使用：
+
+```bash
+KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start
+```
+
+当前 `RUNNING` 状态：无本项目 B200 full training；保活应为运行状态。下一位执行者先按第 0 节模板做只读确认，再决定是否以 strict 或显式 reduced 路径手动启动。

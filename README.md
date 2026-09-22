@@ -118,6 +118,45 @@ cd src/r1-v
 bash ../scripts/run_grpo_video_ktr.sh
 ```
 
+### Cluster 3 B200 reproducibility profile
+
+The upstream command above remains the reference launcher.  This repository
+also contains a separately gated, offline 8×B200 profile for reproducibility
+work: 16,384 prompt tokens, 768 completion tokens, `G=8`,
+FlashAttention-2, and Holmes-16k.  Its B200 paired smoke has passed, but a
+full epoch has **not** been started by this repository workflow.
+
+The B200 path uses `paper/per_completion`: every completion receives an exact
+top-20% mask for E/V/T, visual/temporal scores use absolute delta, one
+non-identity temporal permutation is used per rank/step, and image/video token
+IDs are handled separately.  See [B200_REPRODUCTION.md](B200_REPRODUCTION.md)
+for the environment, evidence, alignment table, data caveat, and recovery
+procedure; remote collaboration messages follow
+[REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md).
+
+On the configured GPU machine, the operator—not the setup workflow—runs the
+full job.  The strict command proceeds only after all 16,916 Holmes media
+records are present and mixed-media decoder verification has no rejection:
+
+```bash
+B200_ALLOW_PAUSE_KEEPALIVE=1 VARIANT=ktr ./run_full_b200.sh
+```
+
+The currently available `15,365 / 16,916` media subset requires an explicit
+opt-in and is labeled `reduced-media-subset`; it is not a strict full-data
+result:
+
+```bash
+B200_ALLOW_PAUSE_KEEPALIVE=1 \
+B200_ALLOW_REDUCED_HOLMES=1 \
+VARIANT=ktr ./run_full_b200.sh
+```
+
+`run_full_b200.sh` streams preflight ETA, training progress, and GPU heartbeat
+to the terminal.  It keeps the external protection workload running during
+CPU-only preparation, pauses it only for GPU work through its official
+controller, and restores/verifies it after success, failure, or interruption.
+
 ------------------------------------------------------------------------
 
 ## 🖍 Inference & Evaluation

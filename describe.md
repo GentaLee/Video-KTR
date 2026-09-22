@@ -1,81 +1,77 @@
-# Video-KTR：当前可运行的验证流程
+# Video-KTR：集群 3 B200 当前复现状态
+
+本文是当前可执行验证的简要快照。跨机器协作时，以 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md) 的固定对话格式、证据位置和交接规则为准；其中的历史 H200 记录不代表当前 B200 结论。
 
 ```text
-视频 / 图像 + 问题
+图像 / 视频 + 问题
         ↓
-Qwen2.5-VL 为每个 prompt 采样 G=4 个 CoT completion
+Qwen2.5-VL 对每个 prompt 采样 G=8 个 CoT completion
         ↓
-对同一 completion 做原始 teacher-forcing
-        ├── token entropy                         → 高熵 E
-        ├── 视觉 token 屏蔽（共享原始 mRoPE）     → 视觉敏感 V
-        └── 多个非恒等帧置换（共享原始 mRoPE）    → 时序敏感 T
+同一 completion 的 teacher-forcing 反事实打分
+ ├─ 熵                           → 高熵 E
+ ├─ 屏蔽视觉 token（共享原 mRoPE） → 视觉敏感 V
+ └─ 1 个非恒等随机帧置换（共享原 mRoPE）
+                                → 时序敏感 T
         ↓
-每条 completion 分别取 E/V/T 的 top 20%
+每条 completion 内，E/V/T 各自精确取 top 20%
+（视觉/时序分数均为 |Δ log p|）
         ↓
 U = E ∪ V ∪ T
         ↓
-baseline：所有有效 completion token 进入 GRPO + KL
-KTR：只有 U 中 token 进入 GRPO policy + KL
-        ↓
-direct GRPO backward / optimizer，并记录耗时、显存和利用率
+baseline：全部有效 completion token 进入 GRPO + KL
+KTR：仅 U 中 token 进入 GRPO policy + KL
 ```
 
-目前实现采用 `paper/per_completion`：视觉与时序分数使用原始与 counterfactual token log-probability 的绝对差；时序分数是多个帧置换的平均值。`U` 是三类 mask 的并集，而不是三类 token 的人工语义标签。
+`E`、`V`、`T` 是由分数与反事实变化选出的 mask，并非 token 的人工语义类别；一个 token 可以同时属于多个集合。实现已分别读取 `image_token_id` 和 `video_token_id`，不再把视频 token 当作图像 token 处理。
 
-## 已完成的 smoke
+## 对齐配置
 
-历史 4×H200 smoke 已完成 baseline 与 KTR 各一个优化步（`global_step=1`）：
+| 项目 | 当前 B200 配置 | 状态 |
+| --- | --- | --- |
+| 计算资源 | 集群 3，8×B200、8 ranks | 已通过 paired smoke |
+| 模型 / 数据请求 | Qwen2.5-VL-7B-COT-SFT / Holmes-16k | 模型已校验；数据见下文 |
+| 最大 prompt / completion | 16,384 / 768 | 对齐原始 launcher |
+| 生成数 | G=8 | 对齐 |
+| Attention | FlashAttention-2（原生 B200 架构；Qwen rotary dtype 兼容 shim） | 已做真实前反向验证 |
+| `nframes` | 8 | 对齐原始脚本未显式传参时的默认值 |
+| `max_pixels` | CLI 请求 `401408` | 已传入；实际视频限制另见下文 |
+| token 筛选 | `paper/per_completion`、精确 20%、绝对 delta | 已验证 |
+| 时序扰动 | 每个 rank/step 1 个可复现的非恒等随机置换；不额外包含 reverse | 已验证 |
+
+## 最终 B200 paired smoke
+
+最终 smoke 使用 8 个固定视频样本，baseline 与 KTR 各完成一个真实优化步。它验证的是：8 rank 启动、FA2 实际解析、Qwen rotary 前反向、视频 V/T 路径、E/V/T/union、GRPO 反向与优化、资源采集，以及任务结束后无训练进程和保活恢复。image/video token ID 的分离由启动 preflight 验证；mixed-modality sampler 的真实训练覆盖留给 full。证据保存在 `<共享持久卷>/video-ktr-b200/artifacts/grpo-smoke-b200/<UTC>/`，不随 Git 提交。
 
 | 指标 | baseline | KTR |
 | --- | ---: | ---: |
-| 外层时长 | 66.633 s | 70.598 s |
-| 单卡峰值显存（四卡最大） | 89,839 MiB | 92,197 MiB |
+| 外层耗时 | 94.840 s | 95.008 s |
+| 跨已监控 GPU 最大显存 | 47,858 MiB | 45,870 MiB |
 | GPU 利用率峰值 | 100% | 100% |
-| KTR 最后一步 token 平均 | — | E/V/T=45.5/45.5/45.5，union=80.188，update ratio=35.7% |
+| KTR 末步 E / V / T 平均 token 数 | — | 44.172 / 44.172 / 44.172 |
+| KTR union 平均 token 数 / 更新比例 | — | 75.859 / 35.0% |
 
-这些 smoke 与同形状容量 smoke 都发生在 length-control 修复和启动时 provenance 契约加入之前：它们证明链路与资源量级，但**不是** KTR/baseline 的公平数值对比。修复后的 paired smoke 必须重跑。KTR 的实际 CoT 中已保存 E/V/T token 与局部上下文；例如 E 中有 `for`、`,`、`I`，V 中有 `question`、`letters`、`image`，T 中有 `about`、`at`。这些 example 的判断依据是分数变化，功能词也可能被选中，不能只凭 token 字面含义判断对错。完整证据位于本地、不随 Git 提交的 artifact；其交接方式与内联对比表见 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md)。
+该结果只是一对单步、小样本 smoke，不能据此宣称完整 epoch 的速度、显存或训练效果结论；但 8 卡单步峰值远低于单卡容量，证明当前 profile 可以进入后续全量稳定性验证。
 
-随后又以 full 相同的 completion=512、5 次时序置换运行 KTR-only 容量 smoke：真实优化步通过，外层 79.013 s、训练内部 40.6615 s、单卡峰值仍为 92,197 MiB、四卡峰值利用率 100%。因此 4×H200 已经实测足够启动该 full profile，不切换到 8×B200；完整 epoch 的稳定性仍以后续 full artifact 为准。
+KTR token report 共保存 768 个 union token，均位于 CoT：`E=341`、`V=592`、`T=472`（集合可重叠）。局部例子如下：
 
-为规避当前 FlashAttention2/mRoPE 的 dtype 兼容问题，验证过的 launcher 默认使用 `ATTN_IMPLEMENTATION=sdpa`。
+| 类别 | 选中的 token 示例 | CoT 局部语境示例 |
+| --- | --- | --- |
+| E | ` step`、` First`、` analyze`、` with` | `<think>Let me think about this step by step...` |
+| V | ` step`、` First`、`'ll`、` analyze`、` what` | 视觉内容推理段 |
+| T | ` step`、` by`、` First`、`'ll`、` analyze` | 帧间过程推理段 |
 
-## 已结束的 full 故障与当前修复
+这些字面上包含功能词的 token 是正常现象：分类依据是对应反事实下的分数变化，不应凭 token 文本本身判断其“是否视觉/时序”。
 
-旧探索性 full 已在约 `global_step=529` 结束：rank 1/2/3 等待下一次 ZeRO collective，rank 0 停在前一 collective，且显存未到 OOM 范围。最高置信推断是 rank 0 在 generation 前的 whole-file 视频预处理停住；这仍需新的短恢复实际回归验证，不能写成已证明的唯一根因。
+## 数据与严格复现边界
 
-首次 checkpoint-500 诊断没有复现该问题：它在任何 batch 之前就因 PyTorch 2.10 默认 `weights_only=True` 拒绝 DeepSpeed 0.15.4 的旧 ZeRO state 而退出，所需类型仅为 `ZeroStageEnum` 和 `LossScaler`。修复保持 `weights_only=True`，只在恢复的 `trainer.train(...)` 作用域内 allowlist 这两个已核验类型；4×H200 已完成 step 500→501 的真实恢复 smoke，包含完整 ZeRO load、生成、E/V/T/union、反向和优化，且结束后 GPU 无残留。step 529 仍待后续受控诊断跨越。
+当前集群 3 已准备并路径核验 `15,365 / 16,916` 条 Holmes 记录，其中 `8,765` 条图像、`6,600` 条视频；缺失 `1,551` 条，且均为视频（233 个唯一媒体路径）。因此：
 
-修复后的 launcher 默认先以训练相同的 Qwen/torchvision 视频预处理做 CPU-only、可终止子进程 decode verification；它实时显示吞吐/ETA，写入绑定 source SHA、video root、backend、帧数与像素配置的 manifest/rejection JSON。可恢复的媒体错误才会被过滤；worker 异常退出或 0 条通过会 fail-fast 并保留诊断证据。训练期会保留 rank 0 实时进度、GPU heartbeat、四个 rank 日志；诊断模式还会写每 rank phase trace 和 NCCL timeout 证据。若 decoder 过滤任何视频，结果只能称为“数据质量过滤后的降级复现”。
+- 默认 strict full 会拒绝启动，只有完整 `16,916` 条并通过媒体 decode 预检才能称为严格 Holmes-16k 复现。
+- 若操作者明确设置 `B200_ALLOW_REDUCED_HOLMES=1`，可运行当前子集；所有产物必须标记 `reproduction_class=reduced-media-subset`，不得与严格全量结果混称。
+- full 启动前会以训练相同的 Qwen/torchvision 路径检查混合图像和视频，并实时报告吞吐与 ETA；若 decode 有 rejection，默认拒绝，另需显式 `B200_ALLOW_DECODER_FILTERED=1` 才能以额外 filtered 降级继续。
 
-## 完整验证
+`max_pixels=401408` 是原始 launcher 对 Qwen 工具链传入的 CLI 请求值，当前没有偷偷改小。需要区分的是，随代码携带的 Qwen 视频预处理还存在约 `105369` 的单帧有效像素上限；本次 smoke 实际视频帧约为 `94,080–98,784` 像素。因此报告会同时记录“请求值”和“实际有效限制”，而不会错误声称每帧都达到了 `401408`。
 
-full 由操作者在 GPU 机器手动启动。脚本不含私有路径默认值，先显式设置 `MODEL_PATH=<MODEL_ROOT>/Video-R1/Qwen2.5-VL-7B-COT-SFT` 与 `DATA_ROOT=<DATA_ROOT>`；`RUN_ROOT` 必须是不存在的新目录，且 `NFRAMES` 必须为不少于 2 的偶数。当前离线 wheelhouse 依赖基础 GPU image 的显式 import gate。clean Python 在本版本不受支持：完整离线依赖 bundle 还必须配合后续扩展并验证的 full-overlay 安装模式，不能绕过 gate 或联网补包。若节点有外部保活，还必须同时设置 `KEEPALIVE_MAIN=<KEEPALIVE_MAIN>`、`KEEPALIVE_LAUNCHER=<KEEPALIVE_LAUNCHER>` 后才可传入暂停授权；授权后会在显存 gate 前精确暂停该保活：
+## 下一步
 
-```bash
-cd <REPO_ROOT>
-VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-decoder-verified-<UTC> ./run_full.sh
-```
-
-有已配置且获准暂停的外部保活时，才使用 `ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr ./run_full.sh`。
-
-先用 checkpoint-500 做恢复诊断，才建议启动上述正式 full：
-
-```bash
-old_run=<ARTIFACT_ROOT>/ktr-20260921T131854Z
-VARIANT=ktr \
-RUN_ROOT=<ARTIFACT_ROOT>/ktr-checkpoint500-diag-<UTC> \
-PREPARED_DATASET="${old_run}/Video-R1-260k-video-verified.json" \
-USE_EXISTING_PREPARED_DATASET=1 \
-RESUME_FROM_CHECKPOINT="${old_run}/training/checkpoint-500" \
-VERIFY_VIDEO_DECODE=0 MAX_STEPS=540 SKIP_FINAL_MODEL_SAVE=true \
-NCCL_DIAGNOSTICS=1 RANK_PHASE_TRACE=1 \
-./run_full.sh
-```
-
-诊断 phase 2 会先核验所有 optimizer shard 的 restricted safe-global 契约，并经同一 DeepSpeed loader 读入一个小 probe；不要设置全局 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`。脚本会先筛选路径、随后默认做全量 decoder verification，并连续输出验证 ETA 与训练 heartbeat；写入训练时长/显存/利用率、源码和数据 provenance。历史 full 输入均为 video，诊断恢复会在终端确认使用父类 `RandomSampler`，以保持 checkpoint 的取样契约。预检与训练均被 launcher 跟踪；收到中断时会先停止它们，才恢复此前验证性暂停的保活。NCCL watchdog dump 应从 `training.log`/`torchrun-logs` 与 rank trace 分析，不应假定有可直接传给 `fr_trace.py` 的磁盘文件。未配置保活时会说明没有恢复命令：
-
-```bash
-bash <KEEPALIVE_LAUNCHER>
-```
-
-只在自动恢复校验失败、确认训练已停止且 `main.py` 不存在时执行该命令。完整参数、baseline 对照命令与产物说明见 [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
+`somke-b200.sh` 已成功完成最终 smoke；对应 full launcher 只供操作者在集群 3 手动执行，**尚未由本次验证启动**。它会在训练期间暂停已核验的保活，且无论成功、失败或中断都会确认训练进程退出后恢复保活。严格和降级两种启动命令、环境契约、FA2 兼容处理、数据下载/补齐清单及完整证据索引均见 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md)。
