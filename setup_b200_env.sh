@@ -293,12 +293,23 @@ platform_pth_tmp="${platform_pth_file}.tmp.$$"
 printf '%s\n' "${platform_sites[@]}" "${platform_bridge}" > "${platform_pth_tmp}"
 mv -f "${platform_pth_tmp}" "${platform_pth_file}"
 
+# DeepSpeed 0.15.4 still imports ``distutils`` directly, while Python 3.12
+# only supplies the compatible implementation after setuptools initializes
+# its local shim.  A .pth import runs before torchrun/DeepSpeed imports in
+# every worker, and the explicit mode avoids accidentally preferring a removed
+# stdlib copy.
+distutils_pth_file="${venv_site}/video_ktr_distutils_compat.pth"
+distutils_pth_tmp="${distutils_pth_file}.tmp.$$"
+printf '%s\n' 'import setuptools' > "${distutils_pth_tmp}"
+mv -f "${distutils_pth_tmp}" "${distutils_pth_file}"
+
 mkdir -p "${b200_root}/.pip-cache" "${b200_root}/.pip-tmp" "$(dirname "${manifest_path}")"
 export PIP_CACHE_DIR="${b200_root}/.pip-cache"
 export TMPDIR="${b200_root}/.pip-tmp"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PIP_NO_INDEX=1
 export PYTHONNOUSERSITE=1
+export SETUPTOOLS_USE_DISTUTILS=local
 # Avoid an ambient control-plane PYTHONPATH shadowing the pinned venv during
 # either package installation or the subsequent import gate.  The two durable
 # .pth files above provide the only required project/platform paths.

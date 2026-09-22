@@ -331,6 +331,7 @@ PY
 require_path "venv site-packages" "${site_dir}"
 
 export PYTHONNOUSERSITE=1
+export SETUPTOOLS_USE_DISTUTILS=local
 # Python consults PYTHONPATH before site-packages.  Put the pinned venv first
 # and discard any inherited control-plane paths so phase 2 cannot validate a
 # platform Transformers build that differs from the runtime we launch.
