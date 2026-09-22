@@ -319,6 +319,7 @@ write_source_provenance() {
             "${project_root}/src/grpo_prepare_dataset.py" \
             "${project_root}/src/r1-v/src/open_r1/grpo.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/grpo_trainer.py" \
+            "${project_root}/src/r1-v/src/open_r1/trainer/qwen25vl_fa2_compat.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/video_ktr_grpo_trainer.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/ktr_token_utils.py"; do
             [[ -f "${source_path}" ]] || continue

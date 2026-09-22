@@ -126,13 +126,13 @@ def main() -> int:
             fmt(duration_ktr),
             fmt(delta(duration_baseline, duration_ktr)),
         ),
-        "| 单卡显存峰值（MiB，四卡最大） | %s | %s | %s |"
+        "| 单卡显存峰值（MiB，跨已监控 GPU 最大） | %s | %s | %s |"
         % (
             fmt(peak_memory_baseline, 2),
             fmt(peak_memory_ktr, 2),
             fmt(delta(peak_memory_baseline, peak_memory_ktr), 2),
         ),
-        "| 单卡 GPU 利用率峰值（%%，四卡最大） | %s | %s | %s |"
+        "| 单卡 GPU 利用率峰值（%%，跨已监控 GPU 最大） | %s | %s | %s |"
         % (
             fmt(peak_util_baseline, 2),
             fmt(peak_util_ktr, 2),

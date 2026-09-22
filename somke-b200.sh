@@ -479,7 +479,10 @@ log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
     printf 'profile=8xB200-upstream-aligned\n'
     printf 'timestamp_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'b200_root=%s\nmodel_path=%s\ndata_root=%s\ndataset_source=%s\n' "${b200_root}" "${model_path}" "${data_root}" "${dataset_source}"
-    printf 'holmes_requested=Holmes-16k\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\nmax_pixels=401408\nnframes=16\n'
+    # The upstream launcher leaves nframes unset; GRPOScriptArguments defaults
+    # it to 8.  Keep that value explicit in this reproduction profile rather
+    # than retaining the earlier 16-frame stress setting.
+    printf 'holmes_requested=Holmes-16k\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\nmax_pixels=401408\nnframes=8\n'
     printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\ntemporal_permutations=1\ntemporal_include_reverse=false\n'
     printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
     printf 'image_video_token_ids=distinct\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
@@ -553,7 +556,7 @@ export MAX_PROMPT_LENGTH=16384
 export MAX_COMPLETION_LENGTH=768
 export NUM_GENERATIONS=8
 export MAX_PIXELS=401408
-export NFRAMES=16
+export NFRAMES=8
 export TEMPORAL_PERMUTATIONS=1
 export TEMPORAL_INCLUDE_REVERSE=false
 export SMOKE_DATA_TYPE=video
@@ -563,7 +566,10 @@ export VARIANT="${VARIANT:-both}"
 export VIDEO_KTR_RANK_TRACE=1
 export VIDEO_KTR_REQUIRE_ATTN_IMPLEMENTATION=flash_attention_2
 export VIDEO_KTR_QWEN_FA2_ROTARY_DTYPE_COMPAT=1
-export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}"
+# PyTorch's B200 image renamed this setting.  Drop any inherited deprecated
+# spelling so distributed workers do not emit a warning on every rank.
+unset TORCH_NCCL_TRACE_BUFFER_SIZE
+export TORCH_FR_BUFFER_SIZE="${TORCH_FR_BUFFER_SIZE:-2000}"
 export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
