@@ -14,6 +14,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -51,6 +52,7 @@ from open_r1.trainer.video_ktr_grpo_trainer import (  # noqa: E402
     ModalityBlockSampler,
     VideoKTRGRPOTrainer,
 )
+from open_r1.trainer.grpo_trainer import Qwen2VLGRPOTrainer  # noqa: E402
 
 
 PACKAGE_HELPER = ROOT / "src" / "r1-v" / "src" / "open_r1" / "trainer" / "ktr_token_utils.py"
@@ -183,6 +185,31 @@ class DatasetPathSafetyTests(unittest.TestCase):
 
 
 class ModalityBlockSamplerTests(unittest.TestCase):
+    def test_homogeneous_dataset_delegates_to_historical_parent_sampler(self) -> None:
+        class Dataset:
+            def __init__(self, data_types: list[str]) -> None:
+                self.data_types = data_types
+
+            def __len__(self) -> int:
+                return len(self.data_types)
+
+            def __getitem__(self, key: str) -> list[str]:
+                if key != "data_type":
+                    raise KeyError(key)
+                return self.data_types
+
+        trainer = VideoKTRGRPOTrainer.__new__(VideoKTRGRPOTrainer)
+        trainer.train_dataset = Dataset(["video", "video", "video"])
+        trainer.accelerator = SimpleNamespace(is_main_process=False)
+        historical_sampler = object()
+        with patch.object(
+            Qwen2VLGRPOTrainer,
+            "_get_train_sampler",
+            return_value=historical_sampler,
+        ) as parent_sampler:
+            self.assertIs(trainer._get_train_sampler(), historical_sampler)
+        parent_sampler.assert_called_once_with()
+
     def test_global_blocks_are_homogeneous_reproducible_and_record_tail_padding(self) -> None:
         data_types = ["image"] * 5 + ["video"] * 9
         recorded_plans: list[dict[str, object]] = []

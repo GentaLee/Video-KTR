@@ -15,10 +15,27 @@ env_file="${B200_ENV_FILE:-${b200_root}/b200.env}"
 
 # An untracked, machine-local environment file keeps deployment-specific
 # controller paths out of Git.  Explicit exported variables take precedence.
+explicit_b200_names=()
+explicit_b200_values=()
+for name in \
+    B200_ROOT B200_ENV_FILE B200_RUN_ROOT B200_MODEL_PATH B200_DATA_ROOT \
+    B200_DATASET_SOURCE B200_KEEPALIVE_MAIN B200_KEEPALIVE_LAUNCHER \
+    B200_ALLOW_PAUSE_KEEPALIVE B200_SMOKE_PROBLEM_IDS; do
+    if [[ -v "${name}" ]]; then
+        explicit_b200_names+=("${name}")
+        explicit_b200_values+=("${!name}")
+    fi
+done
 if [[ -f "${env_file}" ]]; then
     # shellcheck disable=SC1090
     source "${env_file}"
 fi
+for index in "${!explicit_b200_names[@]}"; do
+    export "${explicit_b200_names[index]}=${explicit_b200_values[index]}"
+done
+# The local env file may provide B200_ROOT when the operator did not export
+# one; derive all subsequent default paths only after that precedence merge.
+b200_root="${B200_ROOT:-$(cd "${project_root}/.." && pwd)}"
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 run_root="${B200_RUN_ROOT:-${b200_root}/artifacts/grpo-smoke-b200/${timestamp}}"
@@ -36,7 +53,10 @@ allow_pause="${B200_ALLOW_PAUSE_KEEPALIVE:-0}"
 smoke_problem_ids="${B200_SMOKE_PROBLEM_IDS:-9969,10457,10648,10895,11260,11854,11999,12354}"
 
 keepalive_paused=0
-smoke_started=0
+delegated_pid=""
+delegated_pgid=""
+keepalive_original_pid=""
+keepalive_original_ticks=""
 
 mkdir -p "${run_root}"
 
@@ -44,20 +64,59 @@ log() {
     printf '[%(%Y-%m-%d %H:%M:%S)T] [b200-smoke] %s\n' -1 "$*" | tee -a "${run_root}/terminal.log"
 }
 
-process_command_line() {
+process_start_ticks() {
     local pid="$1"
+    [[ -r "/proc/${pid}/stat" ]] || return 1
+    awk '{print $22}' "/proc/${pid}/stat"
+}
+
+process_has_exact_keepalive_main() {
+    local pid="$1"
+    local argument
+    local -a arguments=()
     [[ -r "/proc/${pid}/cmdline" ]] || return 1
-    tr '\0' ' ' < "/proc/${pid}/cmdline"
+    mapfile -d '' -t arguments < "/proc/${pid}/cmdline"
+    for argument in "${arguments[@]}"; do
+        if [[ "${argument}" == "${keepalive_main}" ]]; then
+            return 0
+        fi
+        if [[ -e "${argument}" && "$(realpath -e "${argument}" 2>/dev/null || true)" == "${keepalive_main}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+same_keepalive_identity() {
+    local pid="$1"
+    local ticks="$2"
+    [[ "$(process_start_ticks "${pid}" 2>/dev/null || true)" == "${ticks}" ]] \
+        && process_has_exact_keepalive_main "${pid}"
+}
+
+capture_keepalive_identity() {
+    find_keepalive_pids
+    if (( ${#keepalive_pids[@]} != 1 )); then
+        log "ERROR: cannot capture keep-alive identity; observed ${#keepalive_pids[@]} matching main process(es)"
+        return 1
+    fi
+    keepalive_original_pid="${keepalive_pids[0]}"
+    keepalive_original_ticks="$(process_start_ticks "${keepalive_original_pid}" 2>/dev/null || true)"
+    if [[ -z "${keepalive_original_ticks}" ]] \
+        || ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_ticks}"; then
+        log "ERROR: keep-alive PID identity changed during validation"
+        return 1
+    fi
+    log "keep-alive identity: validated pid=${keepalive_original_pid} start_ticks=${keepalive_original_ticks}"
 }
 
 find_keepalive_pids() {
-    local proc pid command_line
+    local proc pid
     keepalive_pids=()
     for proc in /proc/[0-9]*; do
         [[ -r "${proc}/cmdline" ]] || continue
         pid="${proc##*/}"
-        command_line="$(process_command_line "${pid}" 2>/dev/null || true)"
-        if [[ "${command_line}" == *"${keepalive_main}"* ]]; then
+        if process_has_exact_keepalive_main "${pid}"; then
             keepalive_pids+=("${pid}")
         fi
     done
@@ -81,6 +140,77 @@ wait_for_keepalive_count() {
     return 1
 }
 
+process_is_live() {
+    local pid="${1:-}"
+    local state
+    [[ -n "${pid}" && -r "/proc/${pid}/stat" ]] || return 1
+    state="$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)"
+    [[ -n "${state}" && "${state}" != "Z" ]]
+}
+
+query_gpu_compute_pids() {
+    local snapshot
+    if ! snapshot="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null)"; then
+        return 1
+    fi
+    mapfile -t gpu_compute_pid_snapshot < <(
+        printf '%s\n' "${snapshot}" \
+            | awk '/^[[:space:]]*[0-9]+[[:space:]]*$/ { gsub(/[[:space:]]/, ""); print }'
+    )
+}
+
+wait_for_gpu_quiescence() {
+    local description="$1"
+    local elapsed=0
+    gpu_compute_pid_snapshot=()
+    while (( elapsed < 60 )); do
+        if ! query_gpu_compute_pids; then
+            log "CRITICAL: GPU quiescence ${description}: nvidia-smi compute-process query failed"
+            return 1
+        fi
+        if (( ${#gpu_compute_pid_snapshot[@]} == 0 )); then
+            log "GPU quiescence ${description}: verified no compute processes"
+            return 0
+        fi
+        sleep 1
+        ((elapsed += 1))
+    done
+    if ! query_gpu_compute_pids; then
+        log "CRITICAL: GPU quiescence ${description}: nvidia-smi compute-process query failed"
+        return 1
+    fi
+    log "CRITICAL: GPU quiescence ${description}: compute process(es) remain (${gpu_compute_pid_snapshot[*]:-unknown}); refusing a keep-alive collision"
+    return 1
+}
+
+stop_delegated_smoke() {
+    local pid="${delegated_pid:-}"
+    local pgid="${delegated_pgid:-}"
+    local elapsed=0
+    [[ -n "${pid}" ]] || return 0
+    if process_is_live "${pid}"; then
+        if [[ -n "${pgid}" && "${pgid}" == "${pid}" ]]; then
+            log "cleanup: forwarding TERM to delegated smoke process group=${pgid} before any keep-alive restoration"
+            kill -TERM -- "-${pgid}" 2>/dev/null || true
+        else
+            log "cleanup: forwarding TERM to delegated smoke pid=${pid} before any keep-alive restoration"
+            kill -TERM "${pid}" 2>/dev/null || true
+        fi
+        while process_is_live "${pid}"; do
+            if (( elapsed >= 90 )); then
+                log "CRITICAL: delegated smoke pid=${pid} did not stop within 90s; keep-alive remains paused"
+                return 1
+            fi
+            sleep 1
+            ((elapsed += 1))
+        done
+    fi
+    wait "${pid}" 2>/dev/null || true
+    delegated_pid=""
+    delegated_pgid=""
+    return 0
+}
+
 start_keepalive() {
     find_keepalive_pids
     if (( ${#keepalive_pids[@]} == 1 )); then
@@ -101,13 +231,28 @@ start_keepalive() {
 cleanup() {
     local status=$?
     local restore_status=0
+    local child_stopped=1
     trap - EXIT
+    # The first signal brought us here.  Do not let a second TERM/INT/HUP
+    # interrupt the stop-child → GPU-quiescence → official-restore sequence.
+    trap '' INT TERM HUP
     set +e
+    if ! stop_delegated_smoke; then
+        child_stopped=0
+    fi
     if (( keepalive_paused == 1 )); then
-        log "cleanup: smoke ended (exit=${status}); restoring keep-alive through its official controller"
-        if ! start_keepalive; then
+        if (( child_stopped != 1 )); then
             restore_status=1
-            log "CRITICAL: keep-alive restoration needs operator attention; see ${run_root}/keepalive.log"
+            log "CRITICAL: keep-alive remains paused because delegated smoke may still own GPUs"
+        elif ! wait_for_gpu_quiescence "before keep-alive restore"; then
+            restore_status=1
+            log "CRITICAL: keep-alive remains paused because a compute process still owns a GPU"
+        else
+            log "cleanup: smoke ended (exit=${status}); restoring keep-alive through its official controller"
+            if ! start_keepalive; then
+                restore_status=1
+                log "CRITICAL: keep-alive restoration needs operator attention; see ${run_root}/keepalive.log"
+            fi
         fi
     fi
     if (( status == 0 && restore_status != 0 )); then
@@ -125,6 +270,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+trap 'exit 129' HUP
 
 require_path() {
     local label="$1"
@@ -150,9 +296,15 @@ require_path "data root" "${data_root}"
 require_path "Holmes manifest" "${dataset_source}"
 require_path "keep-alive main" "${keepalive_main}"
 require_path "keep-alive controller" "${keepalive_launcher}"
+keepalive_main="$(realpath -e "${keepalive_main}")"
+keepalive_launcher="$(realpath -e "${keepalive_launcher}")"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
     log "ERROR: nvidia-smi is unavailable; run this on the B200 GPU node"
+    exit 2
+fi
+if ! command -v setsid >/dev/null 2>&1; then
+    log "ERROR: setsid is unavailable; cannot isolate the delegated smoke process group for safe cancellation"
     exit 2
 fi
 gpu_count="$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l | tr -d '[:space:]')"
@@ -254,11 +406,17 @@ elif (( ${#keepalive_pids[@]} != 1 )); then
 else
     log "keep-alive preflight: known main process is pid=${keepalive_pids[0]}"
 fi
+capture_keepalive_identity
 
 log "phase 4/6: stopping keep-alive through its official controller; it remains paused only while smoke work owns the GPUs"
+if ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_ticks}"; then
+    log "ERROR: keep-alive PID identity changed before official stop; refusing to manage it"
+    exit 2
+fi
 keepalive_paused=1
 KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" stop 2>&1 | tee -a "${run_root}/keepalive.log"
 wait_for_keepalive_count 0 "pause"
+wait_for_gpu_quiescence "after keep-alive pause"
 
 log "phase 5/6: launching real-time 8xB200 baseline and Video-KTR optimizer-step smoke"
 export PYTHON_BIN="${python_bin}"
@@ -291,8 +449,28 @@ export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-COLL}"
-smoke_started=1
-"${project_root}/smoke.sh"
-smoke_started=0
+set +e
+setsid "${project_root}/smoke.sh" &
+delegated_pid="$!"
+for ((isolation_attempt = 0; isolation_attempt < 30; isolation_attempt += 1)); do
+    delegated_pgid="$(ps -o pgid= -p "${delegated_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "${delegated_pgid}" == "${delegated_pid}" ]] || ! process_is_live "${delegated_pid}"; then
+        break
+    fi
+    sleep 0.1
+done
+if process_is_live "${delegated_pid}" && [[ "${delegated_pgid}" != "${delegated_pid}" ]]; then
+    log "ERROR: delegated smoke did not create an isolated process group (pid=${delegated_pid}, pgid=${delegated_pgid:-unknown})"
+    exit 2
+fi
+wait "${delegated_pid}"
+delegated_status="$?"
+delegated_pid=""
+delegated_pgid=""
+set -e
+if (( delegated_status != 0 )); then
+    log "delegated smoke failed with exit=${delegated_status}"
+    exit "${delegated_status}"
+fi
 
 log "phase 6/6: smoke passed; the EXIT handler will now restore keep-alive and verify it"

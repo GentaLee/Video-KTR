@@ -310,10 +310,15 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
         )
 
     def _get_train_sampler(self) -> Sampler[int] | None:
-        """Use global homogeneous media blocks instead of Trainer's RandomSampler.
+        """Use global homogeneous blocks only when both media types exist.
 
-        This override is intentionally limited to the direct trainer.  The
-        ordinary upstream trainer keeps its existing sampling behavior.
+        A homogeneous dataset is already globally modality-safe.  Delegating
+        it to the parent sampler deliberately preserves the historical
+        ``RandomSampler`` behavior used by the original all-video full run,
+        so a checkpoint diagnostic can retain its prior data-order contract.
+        Mixed image/video data instead needs deterministic global blocks,
+        because one rank taking an image branch while another takes a video
+        branch is unsafe with ZeRO-3.
         """
 
         if self.train_dataset is None:
@@ -332,6 +337,27 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             raise RuntimeError(
                 "dataset data_type column length differs from dataset length; cannot build modality blocks"
             )
+
+        modalities = set(data_types)
+        if not modalities:
+            raise ValueError("VideoKTRGRPOTrainer requires at least one image/video record")
+        if not modalities.issubset({"image", "video"}):
+            invalid = sorted(repr(value) for value in modalities - {"image", "video"})
+            raise ValueError(
+                "VideoKTRGRPOTrainer data_type must be image/video; "
+                f"got {', '.join(invalid)}"
+            )
+        if len(modalities) == 1:
+            # Do not perturb the original sampler on a single-modality
+            # dataset.  This branch is particularly important for resuming
+            # the historical all-video checkpoint as a focused diagnostic.
+            if self.accelerator.is_main_process:
+                print(
+                    "[ktr] homogeneous dataset uses the parent RandomSampler "
+                    "to preserve the historical sampler contract",
+                    flush=True,
+                )
+            return super()._get_train_sampler()
 
         world_size = int(getattr(self.accelerator, "num_processes", 1))
         per_device_batch_size = int(self.args.per_device_train_batch_size)
