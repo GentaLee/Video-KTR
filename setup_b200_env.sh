@@ -143,16 +143,14 @@ grpo_wheel_files=(
     regex-2024.11.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
     joblib-1.4.2-py3-none-any.whl
     tyro-0.9.10-py3-none-any.whl
-)
-grpo_source_files=(
-    deepspeed-0.15.4.tar.gz
-    rouge_score-0.1.2.tar.gz
+    deepspeed-0.15.4-py3-none-any.whl
+    rouge_score-0.1.2-py3-none-any.whl
 )
 
 for filename in "${compat_files[@]}"; do
     [[ -f "${compat_wheelhouse}/${filename}" ]] || die "missing compatibility wheel: ${compat_wheelhouse}/${filename}"
 done
-for filename in "${grpo_wheel_files[@]}" "${grpo_source_files[@]}"; do
+for filename in "${grpo_wheel_files[@]}"; do
     [[ -f "${grpo_wheelhouse}/${filename}" ]] || die "missing GRPO artifact: ${grpo_wheelhouse}/${filename}"
 done
 
@@ -246,6 +244,8 @@ from pathlib import Path
 
 specification = (
     ("torch", "torch"),
+    ("torchgen", "torch"),
+    ("functorch", "torch"),
     ("torchvision", "torchvision"),
     ("flash_attn", "flash-attn"),
     ("flash_attn_2_cuda", "flash-attn"),
@@ -318,11 +318,6 @@ for filename in "${grpo_wheel_files[@]}"; do
 done
 "${venv_python}" -m pip install --no-index --no-deps --upgrade --force-reinstall "${grpo_paths[@]}"
 
-log "installing DeepSpeed and ROUGE without CUDA-op builds (DS_BUILD_OPS=0)"
-DS_BUILD_OPS=0 "${venv_python}" -m pip install --no-index --no-deps --no-build-isolation --upgrade --force-reinstall \
-    "${grpo_wheelhouse}/deepspeed-0.15.4.tar.gz" \
-    "${grpo_wheelhouse}/rouge_score-0.1.2.tar.gz"
-
 log "checking the resolved project dependency closure (excluding unrelated image packages)"
 "${venv_python}" - <<'PY'
 from collections import deque
@@ -341,6 +336,7 @@ roots = (
     "datasets",
     "accelerate",
     "deepspeed",
+    "rouge_score",
     "peft",
     "einops",
     "nltk",
