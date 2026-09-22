@@ -190,19 +190,18 @@ else
     log "reusing existing isolated venv: ${venv_dir}"
 fi
 
-venv_site="$("${venv_python}" -S - <<'PY'
-import site
-paths = site.getsitepackages()
-if not paths:
-    raise SystemExit('no venv site-packages directory was reported')
-print(paths[0])
+venv_python_minor="$("${base_python}" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
 )"
+venv_site="${venv_dir}/lib/python${venv_python_minor}/site-packages"
 [[ -d "${venv_site}" ]] || die "venv site-packages directory is unavailable: ${venv_site}"
 
 # Repair the old early-sorting compatibility hook before invoking this venv
-# again.  ``-S`` above deliberately avoids executing .pth files while we find
-# the exact venv site directory.
+# again.  Do not derive this path with ``venv_python -S``: in Python 3.12,
+# disabling ``site`` also suppresses the venv prefix adjustment and can point
+# at the platform interpreter's site-packages instead.
 legacy_distutils_pth_file="${venv_site}/video_ktr_distutils_compat.pth"
 rm -f "${legacy_distutils_pth_file}"
 "${venv_python}" -m pip --version >/dev/null 2>&1 \
