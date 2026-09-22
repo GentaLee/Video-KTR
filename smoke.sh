@@ -25,6 +25,8 @@ trainer_program="${project_root}/src/r1-v/src/open_r1/grpo.py"
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 nproc_per_node="${NPROC_PER_NODE:-4}"
 expected_gpu_name="${EXPECTED_GPU_NAME:-H200}"
+required_nproc_per_node="${REQUIRED_NPROC_PER_NODE:-4}"
+smoke_profile="${SMOKE_PROFILE_NAME:-4xH200}"
 min_free_gib="${MIN_FREE_GIB:-120}"
 max_prompt_length="${MAX_PROMPT_LENGTH:-4096}"
 max_completion_length="${MAX_COMPLETION_LENGTH:-256}"
@@ -32,6 +34,8 @@ num_generations="${NUM_GENERATIONS:-4}"
 max_pixels="${MAX_PIXELS:-100352}"
 nframes="${NFRAMES:-8}"
 temporal_permutations="${TEMPORAL_PERMUTATIONS:-2}"
+temporal_include_reverse="${TEMPORAL_INCLUDE_REVERSE:-true}"
+smoke_data_type="${SMOKE_DATA_TYPE:-video}"
 token_record_limit="${TOKEN_RECORD_LIMIT:-12}"
 heartbeat_seconds="${HEARTBEAT_SECONDS:-20}"
 gpu_sample_seconds="${GPU_SAMPLE_SECONDS:-2}"
@@ -321,6 +325,10 @@ write_source_provenance() {
             relative_path="${source_path#${project_root}/}"
             printf 'source_sha256[%s]=%s\n' "${relative_path}" "$(sha256sum "${source_path}" | awk '{print $1}')"
         done
+        printf 'smoke_profile=%s\n' "${smoke_profile}"
+        printf 'required_nproc_per_node=%s\n' "${required_nproc_per_node}"
+        printf 'smoke_data_type=%s\n' "${smoke_data_type}"
+        printf 'temporal_include_reverse=%s\n' "${temporal_include_reverse}"
     } > "${destination}"
 }
 
@@ -341,7 +349,7 @@ print(f"trl={trl.__version__}")
 PY
 }
 
-log "phase 1/7: checking 4xH200 capacity, local inputs, and offline runtime"
+log "phase 1/7: checking ${smoke_profile} capacity, local inputs, and offline runtime"
 if ! command -v nvidia-smi >/dev/null 2>&1; then
     log "ERROR: nvidia-smi is unavailable; run this launcher on the GPU node"
     exit 2
@@ -371,11 +379,15 @@ if [[ ! -d "${site_dir}" ]]; then
     log "ERROR: GRPO overlay is unavailable: ${site_dir}; run ./setup_grpo_env.sh on this GPU node first"
     exit 2
 fi
-for value in "${nproc_per_node}" "${min_free_gib}" "${max_prompt_length}" "${max_completion_length}" "${num_generations}" "${nframes}" "${temporal_permutations}" "${heartbeat_seconds}"; do
+for value in "${nproc_per_node}" "${required_nproc_per_node}" "${min_free_gib}" "${max_prompt_length}" "${max_completion_length}" "${num_generations}" "${nframes}" "${temporal_permutations}" "${heartbeat_seconds}"; do
     validate_positive_integer "configuration value" "${value}"
 done
-if [[ "${nproc_per_node}" != "4" ]]; then
-    log "ERROR: this validated launcher is intentionally a 4-rank H200 configuration; got NPROC_PER_NODE=${nproc_per_node}"
+if [[ "${nproc_per_node}" != "${required_nproc_per_node}" ]]; then
+    log "ERROR: ${smoke_profile} requires NPROC_PER_NODE=${required_nproc_per_node}; got ${nproc_per_node}"
+    exit 2
+fi
+if [[ "${smoke_data_type}" != "video" && "${smoke_data_type}" != "image" && "${smoke_data_type}" != "all" ]]; then
+    log "ERROR: SMOKE_DATA_TYPE must be video, image, or all; got ${smoke_data_type}"
     exit 2
 fi
 if [[ "${variant_request}" != "both" && "${variant_request}" != "baseline" && "${variant_request}" != "ktr" ]]; then
@@ -453,13 +465,13 @@ print(
 PY
 append_runtime_provenance "${source_provenance}"
 
-dataset_json="${run_root}/smoke-four-videos.json"
-log "phase 3/7: creating a path-verified four-video dataset subset (${dataset_ids})"
+dataset_json="${run_root}/smoke-${smoke_data_type}-dataset.json"
+log "phase 3/7: creating a path-verified ${smoke_data_type} dataset subset (${dataset_ids})"
 "${python_bin}" -u "${project_root}/src/grpo_prepare_dataset.py" \
     --source "${dataset_source}" \
     --video-root "${data_root}" \
     --output "${dataset_json}" \
-    --data-type video \
+    --data-type "${smoke_data_type}" \
     --problem-ids "${dataset_ids}" \
     2>&1 | tee -a "${run_root}/terminal.log"
 
@@ -475,6 +487,8 @@ log "phase 3/7: creating a path-verified four-video dataset subset (${dataset_id
     printf 'num_generations=%s\n' "${num_generations}"
     printf 'nframes=%s\n' "${nframes}"
     printf 'temporal_permutations=%s\n' "${temporal_permutations}"
+    printf 'temporal_include_reverse=%s\n' "${temporal_include_reverse}"
+    printf 'smoke_profile=%s\nsmoke_data_type=%s\n' "${smoke_profile}" "${smoke_data_type}"
     printf 'attn_implementation=%s\n' "${attn_implementation}"
     printf 'selection_mode=paper\nselection_scope=per_completion\n'
 } > "${run_root}/launch_config.txt"
@@ -536,9 +550,9 @@ run_variant() {
         --selection_mode paper
         --selection_scope per_completion
         --temporal_permutations "${temporal_permutations}"
-        --temporal_include_reverse true
+        --temporal_include_reverse "${temporal_include_reverse}"
         --temporal_seed 43
-        --run_name "Video-KTR-smoke-${variant}"
+        --run_name "Video-KTR-${smoke_profile}-${variant}"
         --seed 42
     )
     if [[ "${variant}" == "ktr" ]]; then

@@ -12,6 +12,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import torch
@@ -21,6 +22,20 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+# The direct trainer is imported only for its dependency-light sampler tests.
+# These paths mirror the offline launcher instead of relying on whichever TRL
+# version happens to be installed globally on a control host.
+for package_path in reversed(
+    (
+        ROOT / ".python-packages-grpo",
+        ROOT / "src" / "r1-v" / "src",
+        ROOT / "src" / "qwen-vl-utils" / "src",
+    )
+):
+    package_text = str(package_path)
+    if package_path.is_dir() and package_text not in sys.path:
+        sys.path.insert(0, package_text)
 
 from key_token_attribution import (  # noqa: E402
     attribute_key_tokens,
@@ -32,6 +47,10 @@ from key_token_attribution import (  # noqa: E402
     union_masks,
 )
 from grpo_prepare_dataset import resolve_media_path  # noqa: E402
+from open_r1.trainer.video_ktr_grpo_trainer import (  # noqa: E402
+    ModalityBlockSampler,
+    VideoKTRGRPOTrainer,
+)
 
 
 PACKAGE_HELPER = ROOT / "src" / "r1-v" / "src" / "open_r1" / "trainer" / "ktr_token_utils.py"
@@ -119,6 +138,37 @@ class PackagedTrainerHelperParityTests(unittest.TestCase):
         self.assertEqual(len({tuple(item) for item in permutations}), 3)
         self.assertNotIn([0, 1, 2, 3], permutations)
 
+    def test_distributed_generation_sync_requires_initialized_multi_rank_group(self) -> None:
+        sync = ktr_token_utils.requires_synced_generation
+        self.assertFalse(sync(False, False, 1))
+        self.assertFalse(sync(True, False, 4))
+        self.assertFalse(sync(True, True, 1))
+        self.assertTrue(sync(True, True, 4))
+        with self.assertRaisesRegex(ValueError, "world_size"):
+            sync(True, True, 0)
+
+    def test_generation_helper_forwards_explicit_synced_gpus_flag(self) -> None:
+        class RecordingModel:
+            def __init__(self) -> None:
+                self.kwargs: dict[str, object] | None = None
+
+            def generate(self, **kwargs: object) -> torch.Tensor:
+                self.kwargs = kwargs
+                return torch.tensor([[1, 2, 3]])
+
+        model = RecordingModel()
+        output = ktr_token_utils.generate_with_synced_gpus(
+            model,
+            {"input_ids": torch.tensor([[1, 2]])},
+            generation_config=SimpleNamespace(name="test"),
+            synced_gpus=True,
+        )
+
+        self.assertTrue(torch.equal(output, torch.tensor([[1, 2, 3]])))
+        assert model.kwargs is not None
+        self.assertTrue(model.kwargs["synced_gpus"])
+        self.assertIn("generation_config", model.kwargs)
+
 
 class DatasetPathSafetyTests(unittest.TestCase):
     def test_prepare_dataset_rejects_parent_traversal_before_normalization(self) -> None:
@@ -130,6 +180,81 @@ class DatasetPathSafetyTests(unittest.TestCase):
             self.assertIsNone(resolve_media_path(root, "../safe.mp4"))
             self.assertIsNone(resolve_media_path(root, "nested/../safe.mp4"))
             self.assertIsNone(resolve_media_path(root, "/safe.mp4"))
+
+
+class ModalityBlockSamplerTests(unittest.TestCase):
+    def test_global_blocks_are_homogeneous_reproducible_and_record_tail_padding(self) -> None:
+        data_types = ["image"] * 5 + ["video"] * 9
+        recorded_plans: list[dict[str, object]] = []
+        sampler = ModalityBlockSampler(
+            data_types,
+            world_size=2,
+            per_device_batch_size=2,
+            seed=17,
+            plan_callback=recorded_plans.append,
+        )
+
+        epoch_zero = list(sampler)
+        summary = sampler.plan_summary
+        self.assertEqual(summary["global_block_size"], 4)
+        self.assertEqual(summary["input_records"], 14)
+        self.assertEqual(summary["emitted_records"], 20)
+        self.assertEqual(summary["tail_padding_count"], 6)
+        padding = summary["tail_padding_indices_by_modality"]
+        self.assertEqual(len(padding["image"]), 3)
+        self.assertEqual(len(padding["video"]), 3)
+        self.assertEqual(len(recorded_plans), 1)
+        for start in range(0, len(epoch_zero), 4):
+            block = epoch_zero[start : start + 4]
+            self.assertEqual(len(block), 4)
+            self.assertEqual(len({data_types[index] for index in block}), 1)
+        for modality, indices in padding.items():
+            self.assertTrue(all(data_types[index] == modality for index in indices))
+
+        # Rebuilding with the same epoch/seed does not depend on PyTorch's
+        # global RNG, and a repeated iterator does not duplicate the record.
+        duplicate = ModalityBlockSampler(
+            data_types,
+            world_size=2,
+            per_device_batch_size=2,
+            seed=17,
+        )
+        self.assertEqual(epoch_zero, list(duplicate))
+        self.assertEqual(epoch_zero, list(sampler))
+        self.assertEqual(len(recorded_plans), 1)
+
+        sampler.set_epoch(1)
+        epoch_one = list(sampler)
+        self.assertEqual(len(recorded_plans), 2)
+        self.assertEqual(recorded_plans[-1]["epoch"], 1)
+        for start in range(0, len(epoch_one), 4):
+            self.assertEqual(len({data_types[index] for index in epoch_one[start : start + 4]}), 1)
+        sampler.set_epoch(0)
+        self.assertEqual(epoch_zero, list(sampler))
+
+    def test_invalid_modality_or_block_parameters_fail_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "world_size"):
+            ModalityBlockSampler(["image"], world_size=0, per_device_batch_size=1, seed=1)
+        with self.assertRaisesRegex(ValueError, "per_device_batch_size"):
+            ModalityBlockSampler(["image"], world_size=1, per_device_batch_size=0, seed=1)
+        with self.assertRaisesRegex(ValueError, "data_type=image/video"):
+            ModalityBlockSampler(["audio"], world_size=1, per_device_batch_size=1, seed=1)
+
+    def test_single_rank_modality_assertion_rejects_malformed_local_input(self) -> None:
+        # Avoid model initialization: this method only needs the accelerator
+        # device when a distributed process group is initialized.
+        trainer = VideoKTRGRPOTrainer.__new__(VideoKTRGRPOTrainer)
+        trainer.accelerator = SimpleNamespace(device=torch.device("cpu"))
+        self.assertEqual(
+            trainer._collective_homogeneous_data_type([{"data_type": "image"}]),
+            "image",
+        )
+        self.assertEqual(
+            trainer._collective_homogeneous_data_type([{"data_type": "video"}]),
+            "video",
+        )
+        with self.assertRaisesRegex(ValueError, "global modality codes"):
+            trainer._collective_homogeneous_data_type([{"data_type": "audio"}])
 
 
 class SelectionTests(unittest.TestCase):

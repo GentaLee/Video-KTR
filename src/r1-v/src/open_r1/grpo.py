@@ -412,6 +412,45 @@ def main(script_args, training_args, model_args):
         max_pixels=script_args.max_pixels,
         min_pixels=script_args.min_pixels,
     )
+
+    # ``attn_implementation`` is only a request until the checkpoint has
+    # actually been loaded.  Strict accelerator profiles can opt into this
+    # post-load gate so a missing FlashAttention kernel never silently turns a
+    # purported FA2 reproduction into SDPA/eager attention.
+    required_attention = os.environ.get("VIDEO_KTR_REQUIRE_ATTN_IMPLEMENTATION")
+    attention_candidates = [getattr(trainer, "model", None)]
+    seen_candidates: set[int] = set()
+    resolved_attention = None
+    while attention_candidates:
+        candidate = attention_candidates.pop(0)
+        if candidate is None or id(candidate) in seen_candidates:
+            continue
+        seen_candidates.add(id(candidate))
+        config = getattr(candidate, "config", None)
+        if config is not None:
+            for attribute in ("_attn_implementation", "_attn_implementation_internal"):
+                value = getattr(config, attribute, None)
+                if isinstance(value, str) and value:
+                    resolved_attention = value
+                    break
+        if resolved_attention is not None:
+            break
+        for attribute in ("module", "model", "base_model"):
+            nested = getattr(candidate, attribute, None)
+            if nested is not None:
+                attention_candidates.append(nested)
+    if trainer.is_world_process_zero():
+        print(
+            "[grpo] "
+            f"requested_attention={model_args.attn_implementation}; "
+            f"resolved_attention={resolved_attention}",
+            flush=True,
+        )
+    if required_attention and resolved_attention != required_attention:
+        raise RuntimeError(
+            "strict attention gate failed: "
+            f"required {required_attention!r}, resolved {resolved_attention!r}"
+        )
     
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint

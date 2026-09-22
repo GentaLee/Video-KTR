@@ -18,16 +18,21 @@ from __future__ import annotations
 import copy
 import json
 import os
+import random
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator, Sequence
 
 import torch
+from torch.utils.data import Sampler
 
 from .ktr_token_utils import (
     completion_valid_mask,
     compute_logp_delta,
     compute_token_entropy,
+    generate_with_synced_gpus,
     nonidentity_frame_permutations,
+    requires_synced_generation,
     select_top_ratio,
     target_token_logps,
     union_masks,
@@ -38,6 +43,162 @@ from trl.data_utils import is_conversational, maybe_apply_chat_template
 from trl.models import unwrap_model_for_generation
 
 from .grpo_trainer import Qwen2VLGRPOTrainer
+
+
+class ModalityBlockSampler(Sampler[int]):
+    """Yield a reproducible order whose global blocks have one media modality.
+
+    ``accelerate`` shards a normal per-device batch sampler by handing rank
+    ``r`` the ``r``-th microbatch in each global group.  With a batch size of
+    one, a plain random order can therefore hand an image to one ZeRO-3 rank
+    and a video to another at the same optimizer step.  Video-KTR has a real
+    temporal counterfactual forward only for videos, so that mixed group would
+    enter a different sequence of model/collective calls.
+
+    This sampler preserves a random epoch order at *block* granularity while
+    making every global block ``world_size * per_device_batch_size`` records of
+    exactly one modality.  A non-divisible modality tail is padded only with
+    records from that same modality.  The caller records the exact plan so the
+    few deliberate repeats are visible in run provenance.
+    """
+
+    _MODALITIES = ("image", "video")
+
+    def __init__(
+        self,
+        data_types: Sequence[object],
+        *,
+        world_size: int,
+        per_device_batch_size: int,
+        seed: int,
+        plan_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        if world_size < 1:
+            raise ValueError("world_size must be at least one")
+        if per_device_batch_size < 1:
+            raise ValueError("per_device_batch_size must be at least one")
+        self.world_size = int(world_size)
+        self.per_device_batch_size = int(per_device_batch_size)
+        self.global_block_size = self.world_size * self.per_device_batch_size
+        self.seed = int(seed)
+        self._plan_callback = plan_callback
+        self._epoch = 0
+        self._cached_epoch: int | None = None
+        self._cached_indices: list[int] = []
+        self._cached_summary: dict[str, Any] = {}
+        self._indices_by_modality: dict[str, list[int]] = {
+            modality: [] for modality in self._MODALITIES
+        }
+        self._modality_by_index: dict[int, str] = {}
+        invalid: list[tuple[int, object]] = []
+        for index, value in enumerate(data_types):
+            modality = str(value)
+            if modality not in self._indices_by_modality:
+                invalid.append((index, value))
+            else:
+                self._indices_by_modality[modality].append(index)
+                self._modality_by_index[index] = modality
+        if invalid:
+            examples = ", ".join(
+                f"index={index}, data_type={value!r}" for index, value in invalid[:4]
+            )
+            raise ValueError(
+                "ModalityBlockSampler supports only data_type=image/video; "
+                f"invalid examples: {examples}"
+            )
+        if not any(self._indices_by_modality.values()):
+            raise ValueError("ModalityBlockSampler requires at least one record")
+
+    def set_epoch(self, epoch: int) -> None:
+        epoch = int(epoch)
+        if epoch != self._epoch:
+            self._epoch = epoch
+            self._cached_epoch = None
+
+    def _build_plan(self) -> None:
+        if self._cached_epoch == self._epoch:
+            return
+
+        # Keep the plan fully independent of global PyTorch RNG state: every
+        # distributed rank constructs the same ordered sampler locally.
+        generator = random.Random(self.seed + self._epoch)
+        blocks: list[tuple[str, list[int]]] = []
+        padding_by_modality: dict[str, list[int]] = {
+            modality: [] for modality in self._MODALITIES
+        }
+        records_by_modality = {
+            modality: len(indices)
+            for modality, indices in self._indices_by_modality.items()
+        }
+
+        for modality in self._MODALITIES:
+            indices = list(self._indices_by_modality[modality])
+            if not indices:
+                continue
+            generator.shuffle(indices)
+            padding_count = (-len(indices)) % self.global_block_size
+            if padding_count:
+                # Recycle from this shuffled modality only.  This is
+                # intentional and is persisted in the plan summary rather
+                # than allowing accelerate's generic end padding to make a
+                # mixed final global block.
+                padding = [indices[offset % len(indices)] for offset in range(padding_count)]
+                indices.extend(padding)
+                padding_by_modality[modality] = padding
+            blocks.extend(
+                (modality, indices[start : start + self.global_block_size])
+                for start in range(0, len(indices), self.global_block_size)
+            )
+
+        generator.shuffle(blocks)
+        flattened = [index for _modality, block in blocks for index in block]
+        if len(flattened) % self.global_block_size:
+            raise RuntimeError("internal error: modality blocks are not globally aligned")
+        for start in range(0, len(flattened), self.global_block_size):
+            block_modalities = {
+                self._modality_for_index(index)
+                for index in flattened[start : start + self.global_block_size]
+            }
+            if len(block_modalities) != 1:
+                raise RuntimeError("internal error: generated a mixed-modality global block")
+
+        summary = {
+            "epoch": self._epoch,
+            "seed": self.seed,
+            "world_size": self.world_size,
+            "per_device_batch_size": self.per_device_batch_size,
+            "global_block_size": self.global_block_size,
+            "input_records": sum(records_by_modality.values()),
+            "records_by_modality": records_by_modality,
+            "global_blocks": len(blocks),
+            "emitted_records": len(flattened),
+            "tail_padding_count": sum(len(values) for values in padding_by_modality.values()),
+            "tail_padding_indices_by_modality": padding_by_modality,
+        }
+        self._cached_epoch = self._epoch
+        self._cached_indices = flattened
+        self._cached_summary = summary
+        if self._plan_callback is not None:
+            self._plan_callback(dict(summary))
+
+    def _modality_for_index(self, index: int) -> str:
+        try:
+            return self._modality_by_index[index]
+        except KeyError as exc:
+            raise RuntimeError(f"internal error: sampler index {index} is unknown") from exc
+
+    @property
+    def plan_summary(self) -> dict[str, Any]:
+        self._build_plan()
+        return json.loads(json.dumps(self._cached_summary, sort_keys=True))
+
+    def __iter__(self) -> Iterator[int]:
+        self._build_plan()
+        return iter(self._cached_indices)
+
+    def __len__(self) -> int:
+        self._build_plan()
+        return len(self._cached_indices)
 
 
 class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
@@ -81,6 +242,167 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
         self._token_record_path = Path(self.args.output_dir) / (
             f"selected_tokens_rank{self._local_rank}.jsonl"
         )
+        self._rank_trace_enabled = os.environ.get("VIDEO_KTR_RANK_TRACE", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        self._rank_trace_path = Path(self.args.output_dir) / (
+            f"rank_trace_rank{self._local_rank}.jsonl"
+        )
+        self._generation_sync_reported = False
+        self._modality_sampler: ModalityBlockSampler | None = None
+        self._modality_sampler_plan_path = (
+            Path(self.args.output_dir) / "modality_sampler_plan.jsonl"
+        )
+
+    def _rank_trace(self, phase: str, **fields: Any) -> None:
+        """Append a flushed per-rank phase marker when a diagnostic run opts in.
+
+        A C-level decoder stall cannot reliably raise Python in the affected
+        rank.  The last durable ``decode_start`` event then identifies the
+        record that prevented that rank from reaching the next ZeRO
+        collective, without interleaving four ranks' stdout.
+        """
+
+        if not self._rank_trace_enabled:
+            return
+        payload = {
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "rank": self._local_rank,
+            "global_step": int(self.state.global_step),
+            "phase": phase,
+            **fields,
+        }
+        self._rank_trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._rank_trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+
+    def _synced_generation_enabled(self) -> bool:
+        distributed = torch.distributed
+        available = distributed.is_available()
+        initialized = available and distributed.is_initialized()
+        world_size = distributed.get_world_size() if initialized else 1
+        return requires_synced_generation(available, initialized, world_size)
+
+    def _record_modality_sampler_plan(self, summary: dict[str, Any]) -> None:
+        """Persist the rank-0 sampler plan, including intentional tail repeats."""
+
+        if not self.accelerator.is_main_process:
+            return
+        payload = {
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **summary,
+        }
+        self._modality_sampler_plan_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._modality_sampler_plan_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+        padding = payload["tail_padding_indices_by_modality"]
+        print(
+            "[ktr] modality sampler "
+            f"epoch={payload['epoch']} block={payload['global_block_size']} "
+            f"blocks={payload['global_blocks']} "
+            f"tail_padding={payload['tail_padding_count']} "
+            f"(image={len(padding['image'])}, video={len(padding['video'])})",
+            flush=True,
+        )
+
+    def _get_train_sampler(self) -> Sampler[int] | None:
+        """Use global homogeneous media blocks instead of Trainer's RandomSampler.
+
+        This override is intentionally limited to the direct trainer.  The
+        ordinary upstream trainer keeps its existing sampling behavior.
+        """
+
+        if self.train_dataset is None:
+            return None
+        if not hasattr(self.train_dataset, "__len__"):
+            raise ValueError(
+                "VideoKTRGRPOTrainer requires a sized dataset for synchronized modality blocks"
+            )
+        try:
+            data_types = list(self.train_dataset["data_type"])
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                "VideoKTRGRPOTrainer dataset must retain a data_type column containing image/video"
+            ) from exc
+        if len(data_types) != len(self.train_dataset):
+            raise RuntimeError(
+                "dataset data_type column length differs from dataset length; cannot build modality blocks"
+            )
+
+        world_size = int(getattr(self.accelerator, "num_processes", 1))
+        per_device_batch_size = int(self.args.per_device_train_batch_size)
+        configured_data_seed = getattr(self.args, "data_seed", None)
+        seed = int(
+            configured_data_seed
+            if configured_data_seed is not None
+            else getattr(self.args, "seed", 42)
+        )
+        if self._modality_sampler is None:
+            self._modality_sampler = ModalityBlockSampler(
+                data_types,
+                world_size=world_size,
+                per_device_batch_size=per_device_batch_size,
+                seed=seed,
+                plan_callback=self._record_modality_sampler_plan,
+            )
+        return self._modality_sampler
+
+    @staticmethod
+    def _local_modality_code(inputs: object) -> int:
+        """Return an all-gatherable modality code without raising on one rank."""
+
+        if not isinstance(inputs, (list, tuple)) or len(inputs) != 1:
+            return -1
+        example = inputs[0]
+        if not isinstance(example, dict):
+            return -1
+        data_type = example.get("data_type")
+        if data_type == "image":
+            return 0
+        if data_type == "video":
+            return 1
+        return -1
+
+    def _collective_homogeneous_data_type(self, inputs: object) -> str:
+        """Reject a mixed global microbatch before any decode or ZeRO forward.
+
+        The check itself is one fixed-shape collective on every rank.  It
+        catches an accidental sampler regression before image and video ranks
+        can take different temporal-forward or metric branches.
+        """
+
+        local_code = self._local_modality_code(inputs)
+        distributed = torch.distributed
+        initialized = distributed.is_available() and distributed.is_initialized()
+        world_size = distributed.get_world_size() if initialized else 1
+        if world_size > 1:
+            local = torch.tensor(
+                [local_code], dtype=torch.int64, device=self.accelerator.device
+            )
+            gathered = [torch.empty_like(local) for _ in range(world_size)]
+            distributed.all_gather(gathered, local)
+            codes = [int(value.item()) for value in gathered]
+        else:
+            codes = [local_code]
+
+        code_names = {-1: "invalid", 0: "image", 1: "video"}
+        if any(code not in {0, 1} for code in codes):
+            rendered = [code_names.get(code, f"unknown({code})") for code in codes]
+            raise ValueError(
+                "every direct Video-KTR rank requires one image/video record; "
+                f"global modality codes={rendered}"
+            )
+        if len(set(codes)) != 1:
+            rendered = [code_names[code] for code in codes]
+            raise RuntimeError(
+                "mixed image/video global microbatch is unsafe with ZeRO-3; "
+                f"global modality order={rendered}. Use ModalityBlockSampler."
+            )
+        return code_names[codes[0]]
 
     @staticmethod
     def _remove_none_values(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -151,11 +473,40 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             content[0]["nframes"] = self.nframes
             content[0]["max_pixels"] = self.max_pixels
 
-        image_inputs, video_inputs, video_kwargs = process_vision_info(
-            messages, return_video_kwargs=True
+        self._rank_trace(
+            "decode_start",
+            problem_id=example.get("problem_id"),
+            media_path=str(media),
+            data_type=data_type,
         )
+        try:
+            image_inputs, video_inputs, video_kwargs = process_vision_info(
+                messages, return_video_kwargs=True
+            )
+        except BaseException as exc:
+            self._rank_trace(
+                "decode_error",
+                problem_id=example.get("problem_id"),
+                media_path=str(media),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            raise
         if data_type == "video" and not video_inputs:
+            self._rank_trace(
+                "decode_error",
+                problem_id=example.get("problem_id"),
+                media_path=str(media),
+                error_type="EmptyVideoDecode",
+                error="video decoder returned no frame tensor",
+            )
             raise RuntimeError(f"video decoder returned no frame tensor for {media}")
+        self._rank_trace(
+            "decode_done",
+            problem_id=example.get("problem_id"),
+            media_path=str(media),
+            video_shape=(list(video_inputs[0].shape) if video_inputs else None),
+        )
         encoded = self.processing_class(
             text=copy.deepcopy(prompts_text),
             images=image_inputs,
@@ -455,13 +806,43 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
         if return_outputs:
             raise ValueError("VideoKTRGRPOTrainer does not support returning model outputs")
         del num_items_in_batch
+        data_type = self._collective_homogeneous_data_type(inputs)
+        self._rank_trace("modality_agreement", data_type=data_type)
         prompts = [example["prompt"] for example in inputs]
-        prompts_text, image_inputs, video_inputs, video_kwargs, prompt_inputs, data_type = self._prepare_prompt(inputs)
-
-        with unwrap_model_for_generation(model, self.accelerator) as unwrapped_model:
-            prompt_completion_ids = unwrapped_model.generate(
-                **prompt_inputs, generation_config=self.generation_config
+        (
+            prompts_text,
+            image_inputs,
+            video_inputs,
+            video_kwargs,
+            prompt_inputs,
+            prepared_data_type,
+        ) = self._prepare_prompt(inputs)
+        if prepared_data_type != data_type:
+            raise RuntimeError(
+                "dataset data_type changed between collective validation and prompt preparation"
             )
+
+        synced_generation = self._synced_generation_enabled()
+        if synced_generation and self.accelerator.is_main_process and not self._generation_sync_reported:
+            print(
+                "[ktr] generation uses synced_gpus=True to keep distributed ranks "
+                "on the same ZeRO collective sequence",
+                flush=True,
+            )
+            self._generation_sync_reported = True
+        self._rank_trace("generate_start", synced_gpus=synced_generation)
+        with unwrap_model_for_generation(
+            model,
+            self.accelerator,
+            gather_deepspeed3_params=self.args.ds3_gather_for_generation,
+        ) as unwrapped_model:
+            prompt_completion_ids = generate_with_synced_gpus(
+                unwrapped_model,
+                prompt_inputs,
+                self.generation_config,
+                synced_generation,
+            )
+        self._rank_trace("generate_done", generated_shape=list(prompt_completion_ids.shape))
         prompt_length = int(prompt_inputs["input_ids"].shape[1])
         completion_ids = prompt_completion_ids[:, prompt_length:]
         valid_mask = completion_valid_mask(
@@ -477,6 +858,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             prompt_inputs, prompt_completion_ids, prompt_length, valid_mask
         )
         position_ids = self._original_position_ids(model, teacher_inputs)
+        self._rank_trace("policy_start", completion_length=completion_length)
         policy_logps, entropy = self._forward_completion(
             model,
             teacher_inputs,
@@ -486,6 +868,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             with_grad=True,
             need_entropy=self.video_ktr,
         )
+        self._rank_trace("policy_done")
 
         entropy_mask: torch.Tensor | None = None
         visual_mask: torch.Tensor | None = None
@@ -516,6 +899,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                 completion_length,
                 with_grad=False,
             )
+            self._rank_trace("visual_done")
             delta_mode = "absolute" if self.selection_mode == "paper" else "signed"
             visual_delta = compute_logp_delta(policy_logps.detach(), visual_logps, mode=delta_mode)
             entropy_mask = select_top_ratio(
@@ -533,6 +917,12 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                 scope=self.selection_scope,
             )
 
+            # A zero image temporal mask preserves E/V-only selection for
+            # images, while keeping the metrics collective sequence identical
+            # if a future caller bypasses the homogeneous sampler.  The
+            # sampler assertion above still rejects that unsupported mixed
+            # configuration before any model forward.
+            temporal_mask = torch.zeros_like(valid_mask, dtype=torch.bool)
             masks: list[torch.Tensor] = [entropy_mask, visual_mask]
             if data_type == "video":
                 if not video_inputs:
@@ -571,6 +961,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                     accumulated.add_(
                         compute_logp_delta(policy_logps.detach(), temporal_logps, mode=delta_mode)
                     )
+                    self._rank_trace("temporal_done", permutation=permutation)
                 temporal_delta = accumulated.div_(len(permutations))
                 temporal_mask = select_top_ratio(
                     temporal_delta,
@@ -579,7 +970,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                     mode=self.selection_mode,
                     scope=self.selection_scope,
                 )
-                masks.append(temporal_mask)
+            masks.append(temporal_mask)
             union_mask = union_masks(*masks, valid_mask=valid_mask)
             if not bool(union_mask.any().item()):
                 raise RuntimeError("KTR E/V/T union is empty; no token would receive GRPO or KL")
@@ -600,7 +991,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                     "[ktr] "
                     f"protocol={self.selection_mode}/{self.selection_scope} "
                     f"E={int(entropy_mask.sum())} V={int(visual_mask.sum())} "
-                    f"T={int(temporal_mask.sum()) if temporal_mask is not None else 0} "
+                    f"T={int(temporal_mask.sum())} "
                     f"U={int(union_mask.sum())} masked_visual={masked_count}",
                     flush=True,
                 )
@@ -625,6 +1016,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                         completion_length,
                         with_grad=False,
                     )
+        self._rank_trace("ref_done")
 
         completions = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
         if is_conversational(inputs[0]):
@@ -708,15 +1100,15 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             }
         )
         if self.video_ktr:
-            assert entropy_mask is not None and visual_mask is not None
+            assert (
+                entropy_mask is not None
+                and visual_mask is not None
+                and temporal_mask is not None
+            )
             ktr_metrics = {
                 "ktr/entropy_tokens": self._distributed_mean(entropy_mask.sum(dim=1)),
                 "ktr/visual_tokens": self._distributed_mean(visual_mask.sum(dim=1)),
-                "ktr/temporal_tokens": (
-                    self._distributed_mean(temporal_mask.sum(dim=1))
-                    if temporal_mask is not None
-                    else 0.0
-                ),
+                "ktr/temporal_tokens": self._distributed_mean(temporal_mask.sum(dim=1)),
                 "ktr/union_tokens": self._distributed_mean(union_mask.sum(dim=1)),
                 "ktr/update_ratio": self._distributed_mean(
                     union_mask.sum(dim=1).float() / valid_mask.sum(dim=1).clamp_min(1)
@@ -726,4 +1118,5 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                 self._metrics[metric_name].append(metric_value)
             latest_step_metrics.update(ktr_metrics)
         self.latest_step_metrics = latest_step_metrics
+        self._rank_trace("metrics_done")
         return loss

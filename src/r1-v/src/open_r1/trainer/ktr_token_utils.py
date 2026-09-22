@@ -16,6 +16,43 @@ import torch
 from torch import Tensor
 
 
+def requires_synced_generation(
+    distributed_available: bool, distributed_initialized: bool, world_size: int
+) -> bool:
+    """Return whether generation must advance in lockstep across ranks.
+
+    ZeRO-3 can issue parameter collectives from each generation forward.  If
+    one rank stops generation at EOS while another continues, the ranks can
+    enter a different collective sequence and hang.  ``generate`` supports
+    ``synced_gpus`` specifically for this case.  Keeping the predicate pure
+    makes the distributed boundary explicit and unit-testable.
+    """
+
+    if world_size < 1:
+        raise ValueError("world_size must be at least one")
+    return bool(distributed_available and distributed_initialized and world_size > 1)
+
+
+def generate_with_synced_gpus(
+    model: Any,
+    prompt_inputs: dict[str, Any],
+    generation_config: Any,
+    synced_gpus: bool,
+) -> Tensor:
+    """Call ``generate`` with the explicit distributed synchronization flag.
+
+    Keeping the small call boundary here lets the unit test assert that the
+    flag reaches Transformers, rather than only testing the predicate that
+    computes it.
+    """
+
+    return model.generate(
+        **prompt_inputs,
+        generation_config=generation_config,
+        synced_gpus=bool(synced_gpus),
+    )
+
+
 def values_match(left: Any, right: Any) -> bool:
     """Compare processor metadata without reducing tensor equality to a scalar."""
 
