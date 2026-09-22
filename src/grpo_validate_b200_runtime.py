@@ -152,8 +152,10 @@ def observed_runtime() -> tuple[dict[str, str], dict[str, str]]:
         # project venv resolve to /usr/bin/python3.12 on this image.
         "python_executable": os.path.abspath(sys.executable),
         "venv": os.path.abspath(sys.prefix),
-        "torch_file": str(Path(torch.__file__).resolve()),
-        "torchvision_file": str(Path(torchvision.__file__).resolve()),
+        # The bridge is symlinked to platform packages; resolving would hide
+        # whether Python actually imported through the pinned bridge path.
+        "torch_file": os.path.abspath(torch.__file__),
+        "torchvision_file": os.path.abspath(torchvision.__file__),
         "torch_cuda": str(torch.version.cuda),
     }
     return values, locations
@@ -188,12 +190,12 @@ def validate_environment_identity(environment_manifest_path: Path, project_root:
     )
     require_equal(
         "environment manifest torch location",
-        str(Path(str(torch_payload.get("file", ""))).resolve()),
+        os.path.abspath(str(torch_payload.get("file", ""))),
         locations["torch_file"],
     )
     require_equal(
         "environment manifest torchvision location",
-        str(Path(str(torchvision_payload.get("file", ""))).resolve()),
+        os.path.abspath(str(torchvision_payload.get("file", ""))),
         locations["torchvision_file"],
     )
 
