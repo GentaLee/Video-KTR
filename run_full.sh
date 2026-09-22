@@ -22,6 +22,7 @@ dataset_source="${DATASET_SOURCE:-}"
 dataset_json="${PREPARED_DATASET:-${run_root}/Video-R1-260k-video-path-verified.json}"
 deepspeed_config="${DEEPSPEED_CONFIG:-${project_root}/src/r1-v/local_scripts/zero3.json}"
 trainer_program="${project_root}/src/r1-v/src/open_r1/grpo.py"
+import_preflight_program="${project_root}/src/grpo_full_import_preflight.py"
 
 cuda_visible_devices="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 nproc_per_node="${NPROC_PER_NODE:-4}"
@@ -41,6 +42,26 @@ gpu_sample_seconds="${GPU_SAMPLE_SECONDS:-5}"
 attn_implementation="${ATTN_IMPLEMENTATION:-sdpa}"
 resume_from_checkpoint="${RESUME_FROM_CHECKPOINT:-}"
 prepared_dataset_only="${USE_EXISTING_PREPARED_DATASET:-0}"
+verify_video_decode="${VERIFY_VIDEO_DECODE:-1}"
+decoder_verified_dataset="${DECODER_VERIFIED_DATASET:-${run_root}/Video-R1-260k-video-decoder-verified.json}"
+reuse_decoder_verified_dataset="${USE_EXISTING_DECODER_VERIFIED_DATASET:-0}"
+decoder_workers="${VIDEO_DECODE_WORKERS:-16}"
+decoder_timeout_seconds="${VIDEO_DECODE_TIMEOUT_SECONDS:-120}"
+decoder_progress_every="${VIDEO_DECODE_PROGRESS_EVERY:-100}"
+decoder_status_seconds="${VIDEO_DECODE_STATUS_SECONDS:-30}"
+video_reader_backend="${VIDEO_READER_BACKEND:-torchvision}"
+ddp_timeout_seconds="${DDP_TIMEOUT_SECONDS:-600}"
+deepspeed_timeout_minutes="${DEEPSPEED_TIMEOUT_MINUTES:-10}"
+nccl_diagnostics="${NCCL_DIAGNOSTICS:-1}"
+rank_phase_trace="${RANK_PHASE_TRACE:-0}"
+ds3_gather_for_generation="${DS3_GATHER_FOR_GENERATION:-true}"
+skip_final_model_save="${SKIP_FINAL_MODEL_SAVE:-false}"
+# A deliberately explicit non-training integration mode. It exercises the
+# same capacity/import/dataset/decoder checks as a real launch, writes the
+# usual provenance, then exits before starting resource monitoring or
+# torchrun. This prevents a fake trainer-program override from accidentally
+# becoming a real training job during launcher validation.
+preflight_only="${PREFLIGHT_ONLY:-0}"
 
 # Full data would produce an unbounded token JSONL if examples were written on
 # every optimizer step.  The smoke run already captures CoT examples; leave
@@ -68,13 +89,32 @@ paused_keepalive_pid=""
 paused_keepalive_ticks=""
 monitor_pid=""
 heartbeat_pid=""
+preflight_pid=""
+preflight_label=""
 training_started=""
 training_ended=""
 training_exit=""
 training_pid=""
 summary_written=0
+training_dataset_json=""
+resume_global_step=""
+decoder_manifest=""
 
-mkdir -p "${run_root}"
+# Never append a log to an existing artifact. ``mkdir`` of the leaf is the
+# atomic ownership claim; checking first only improves the error message.
+run_root_parent="$(dirname "${run_root}")"
+if [[ -e "${run_root}" ]]; then
+    printf '[grpo-full] ERROR: RUN_ROOT must name a new directory so an earlier artifact is never overwritten: %s\n' "${run_root}" >&2
+    exit 2
+fi
+if ! mkdir -p "${run_root_parent}"; then
+    printf '[grpo-full] ERROR: cannot create RUN_ROOT parent: %s\n' "${run_root_parent}" >&2
+    exit 2
+fi
+if ! mkdir "${run_root}"; then
+    printf '[grpo-full] ERROR: cannot atomically claim new RUN_ROOT (it may have appeared concurrently): %s\n' "${run_root}" >&2
+    exit 2
+fi
 
 log() {
     printf '[%(%Y-%m-%d %H:%M:%S)T] [grpo-full] %s\n' -1 "$*" | tee -a "${run_root}/terminal.log"
@@ -120,6 +160,66 @@ stop_training() {
     wait "${pid}" 2>/dev/null || true
     training_pid=""
     return 0
+}
+
+process_group_is_live() {
+    local process_group_id="${1:-}"
+    [[ "${process_group_id}" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 -- "-${process_group_id}" 2>/dev/null
+}
+
+stop_preflight() {
+    local pid="${preflight_pid:-}"
+    local waited=0
+    if [[ -z "${pid}" ]]; then
+        return 0
+    fi
+    if process_group_is_live "${pid}"; then
+        log "interrupt cleanup: sending TERM to tracked ${preflight_label:-preflight} process group=${pid} before restoring keep-alive"
+        kill -TERM -- "-${pid}" 2>/dev/null || true
+        while process_group_is_live "${pid}"; do
+            if (( waited >= 45 )); then
+                log "CRITICAL: ${preflight_label:-preflight} process group=${pid} did not stop within 45s; keep-alive will remain paused to avoid a GPU conflict"
+                return 1
+            fi
+            sleep 1
+            ((waited += 1))
+        done
+    fi
+    wait "${pid}" 2>/dev/null || true
+    preflight_pid=""
+    preflight_label=""
+    return 0
+}
+
+run_logged_preflight() {
+    local label="$1"
+    shift
+    if [[ -n "${preflight_pid}" ]]; then
+        log "ERROR: cannot start ${label}; tracked preflight ${preflight_label} is still present"
+        return 2
+    fi
+    if ! command -v setsid >/dev/null 2>&1; then
+        log "ERROR: setsid is required to supervise ${label} safely"
+        return 2
+    fi
+    # A dedicated session makes a TERM to this launcher able to stop exactly
+    # the Python+tee pipeline and its spawned decoder workers, without broad
+    # process matching or touching unrelated workloads.
+    RUN_FULL_PIPELINE_LOG="${run_root}/terminal.log" \
+        setsid bash -c 'set -o pipefail; "$@" 2>&1 | tee -a "${RUN_FULL_PIPELINE_LOG}"' bash "$@" &
+    preflight_pid="$!"
+    preflight_label="${label}"
+    local status
+    if wait "${preflight_pid}"; then
+        preflight_pid=""
+        preflight_label=""
+        return 0
+    fi
+    status=$?
+    preflight_pid=""
+    preflight_label=""
+    return "${status}"
 }
 
 process_start_ticks() {
@@ -216,6 +316,46 @@ write_summary() {
     summary_written=1
 }
 
+write_failure_marker() {
+    local exit_code="$1"
+    local destination="${run_root}/training_failed.json"
+    [[ -f "${destination}" ]] && return 0
+    if ! "${python_bin}" - "${destination}" "${exit_code}" "${variant}" "${training_dataset_json:-}" "${resume_from_checkpoint:-}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+destination, exit_code, variant, dataset, checkpoint = sys.argv[1:]
+payload = {
+    "event": "training_failed",
+    "ended_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "exit_code": int(exit_code),
+    "variant": variant,
+    "training_dataset_json": dataset or None,
+    "resume_from_checkpoint": checkpoint or None,
+}
+Path(destination).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+    then
+        log "WARNING: could not write ${destination}"
+    fi
+}
+
+print_nccl_recovery_command() {
+    [[ "${nccl_diagnostics}" == "true" ]] || return 0
+    # TORCH_NCCL_DUMP_ON_TIMEOUT writes the in-memory recorder to the rank
+    # stderr captured by torchrun, not to the on-disk per-rank trace files
+    # required by fr_trace.py.  Do not advertise a misleading fr_trace
+    # command unless this launcher also implements an explicit trace dump.
+    log "NCCL diagnostics: inspect ${run_root}/training.log and ${run_root}/torchrun-logs for the watchdog dump."
+    if [[ "${rank_phase_trace}" == "true" ]]; then
+        log "Rank-phase attribution: inspect ${run_root}/training/rank_trace_rank*.jsonl; the last decode_start identifies a stalled media item."
+    else
+        log "Rank-phase trace was disabled. Re-run a bounded diagnostic with RANK_PHASE_TRACE=1 if phase attribution is needed."
+    fi
+}
+
 print_keepalive_command() {
     if (( keepalive_configured != 1 )); then
         log "external keep-alive management was not configured; no recovery command is available"
@@ -230,11 +370,14 @@ print_keepalive_command() {
 
 cleanup() {
     local status=$?
-    local training_stopped=1
+    local owned_processes_stopped=1
     trap - EXIT
     set +e
+    if ! stop_preflight; then
+        owned_processes_stopped=0
+    fi
     if ! stop_training; then
-        training_stopped=0
+        owned_processes_stopped=0
     fi
     stop_child "${heartbeat_pid}"
     stop_child "${monitor_pid}"
@@ -244,14 +387,18 @@ cleanup() {
         training_exit="${training_exit:-${status}}"
         write_summary
     fi
-    if (( training_stopped == 1 )); then
+    if [[ -n "${training_started}" && "${status}" != "0" ]]; then
+        write_failure_marker "${status}"
+        print_nccl_recovery_command
+    fi
+    if (( owned_processes_stopped == 1 )); then
         if ! restore_external_keepalive; then
             log "keep-alive restoration requires immediate operator attention; see ${run_root}/keepalive_restart.log"
         fi
     else
-        log "CRITICAL: not restoring keep-alive because tracked training may still own the GPUs"
+        log "CRITICAL: not restoring keep-alive because a tracked launcher process may still own the GPUs"
     fi
-    print_keepalive_command "${training_stopped}"
+    print_keepalive_command "${owned_processes_stopped}"
     if (( status == 0 )); then
         log "launcher finished successfully"
     else
@@ -337,6 +484,19 @@ validate_positive_integer() {
     fi
 }
 
+normalize_bool() {
+    local name="$1"
+    local value="$2"
+    case "${value}" in
+        1|true|TRUE|yes|YES) printf 'true\n' ;;
+        0|false|FALSE|no|NO) printf 'false\n' ;;
+        *)
+            log "ERROR: ${name} must be 0/1 or false/true; got '${value}'"
+            return 2
+            ;;
+    esac
+}
+
 write_source_provenance() {
     local destination="$1"
     local source_path relative_path
@@ -355,11 +515,13 @@ write_source_provenance() {
         fi
         for source_path in \
             "${project_root}/run_full.sh" \
+            "${project_root}/src/grpo_full_import_preflight.py" \
             "${project_root}/src/grpo_prepare_dataset.py" \
             "${project_root}/src/r1-v/src/open_r1/grpo.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/grpo_trainer.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/video_ktr_grpo_trainer.py" \
-            "${project_root}/src/r1-v/src/open_r1/trainer/ktr_token_utils.py"; do
+            "${project_root}/src/r1-v/src/open_r1/trainer/ktr_token_utils.py" \
+            "${project_root}/src/grpo_verify_video_decode.py"; do
             [[ -f "${source_path}" ]] || continue
             relative_path="${source_path#${project_root}/}"
             printf 'source_sha256[%s]=%s\n' "${relative_path}" "$(sha256sum "${source_path}" | awk '{print $1}')"
@@ -384,7 +546,7 @@ print(f"trl={trl.__version__}")
 PY
 }
 
-log "phase 1/6: validating 4xH200 capacity, full data, and offline runtime"
+log "phase 1/7: validating 4xH200 capacity, full data, and offline runtime"
 if [[ "${variant}" != "baseline" && "${variant}" != "ktr" ]]; then
     log "ERROR: VARIANT must be baseline or ktr; got ${variant}"
     exit 2
@@ -411,7 +573,7 @@ elif [[ "${allow_pause_external_keepalive}" == "1" ]]; then
 else
     log "external keep-alive management is not configured; no external process will be detected or controlled"
 fi
-for required_path in "${python_bin}" "${model_path}" "${data_root}" "${dataset_source}" "${deepspeed_config}" "${trainer_program}"; do
+for required_path in "${python_bin}" "${model_path}" "${data_root}" "${dataset_source}" "${deepspeed_config}" "${trainer_program}" "${import_preflight_program}"; do
     if [[ ! -e "${required_path}" ]]; then
         log "ERROR: required path is unavailable: ${required_path}"
         exit 2
@@ -421,9 +583,33 @@ if [[ ! -d "${site_dir}" ]]; then
     log "ERROR: GRPO overlay is unavailable: ${site_dir}; run ./setup_grpo_env.sh on this GPU node first"
     exit 2
 fi
-for value in "${nproc_per_node}" "${min_free_gib}" "${max_prompt_length}" "${max_completion_length}" "${num_generations}" "${nframes}" "${temporal_permutations}" "${save_steps}" "${save_total_limit}" "${heartbeat_seconds}"; do
+if ! prepared_dataset_only="$(normalize_bool "USE_EXISTING_PREPARED_DATASET" "${prepared_dataset_only}")"; then exit 2; fi
+if ! verify_video_decode="$(normalize_bool "VERIFY_VIDEO_DECODE" "${verify_video_decode}")"; then exit 2; fi
+if ! reuse_decoder_verified_dataset="$(normalize_bool "USE_EXISTING_DECODER_VERIFIED_DATASET" "${reuse_decoder_verified_dataset}")"; then exit 2; fi
+if ! nccl_diagnostics="$(normalize_bool "NCCL_DIAGNOSTICS" "${nccl_diagnostics}")"; then exit 2; fi
+if ! rank_phase_trace="$(normalize_bool "RANK_PHASE_TRACE" "${rank_phase_trace}")"; then exit 2; fi
+if ! ds3_gather_for_generation="$(normalize_bool "DS3_GATHER_FOR_GENERATION" "${ds3_gather_for_generation}")"; then exit 2; fi
+if ! skip_final_model_save="$(normalize_bool "SKIP_FINAL_MODEL_SAVE" "${skip_final_model_save}")"; then exit 2; fi
+if ! preflight_only="$(normalize_bool "PREFLIGHT_ONLY" "${preflight_only}")"; then exit 2; fi
+if [[ "${video_reader_backend}" != "torchvision" ]]; then
+    log "ERROR: VIDEO_READER_BACKEND must be torchvision because the decoder verifier uses the same qwen-vl-utils reader"
+    exit 2
+fi
+if [[ "${verify_video_decode}" == "false" && "${reuse_decoder_verified_dataset}" == "true" ]]; then
+    log "ERROR: USE_EXISTING_DECODER_VERIFIED_DATASET=1 requires VERIFY_VIDEO_DECODE=1"
+    exit 2
+fi
+if [[ "${reuse_decoder_verified_dataset}" == "true" && "${prepared_dataset_only}" != "true" ]]; then
+    log "ERROR: USE_EXISTING_DECODER_VERIFIED_DATASET=1 requires USE_EXISTING_PREPARED_DATASET=1 so its source manifest is not rebuilt"
+    exit 2
+fi
+for value in "${nproc_per_node}" "${min_free_gib}" "${max_prompt_length}" "${max_completion_length}" "${num_generations}" "${max_pixels}" "${nframes}" "${temporal_permutations}" "${save_steps}" "${save_total_limit}" "${heartbeat_seconds}" "${decoder_workers}" "${decoder_timeout_seconds}" "${decoder_progress_every}" "${decoder_status_seconds}" "${ddp_timeout_seconds}" "${deepspeed_timeout_minutes}"; do
     validate_positive_integer "configuration value" "${value}"
 done
+if (( nframes < 2 || nframes % 2 != 0 )); then
+    log "ERROR: NFRAMES must be an even integer of at least 2 to match Qwen video preprocessing; got ${nframes}"
+    exit 2
+fi
 if [[ "${max_steps}" != "-1" && ! "${max_steps}" =~ ^[1-9][0-9]*$ ]]; then
     log "ERROR: MAX_STEPS must be -1 (one full epoch) or a positive integer; got '${max_steps}'"
     exit 2
@@ -431,6 +617,37 @@ fi
 if [[ "${nproc_per_node}" != "4" ]]; then
     log "ERROR: this validated full profile is intentionally 4-rank H200; got NPROC_PER_NODE=${nproc_per_node}"
     exit 2
+fi
+if [[ -n "${resume_from_checkpoint}" ]]; then
+    if [[ "${prepared_dataset_only}" != "true" ]]; then
+        log "ERROR: RESUME_FROM_CHECKPOINT requires USE_EXISTING_PREPARED_DATASET=1 so dataset order remains unchanged"
+        exit 2
+    fi
+    if [[ "${verify_video_decode}" != "false" ]]; then
+        log "ERROR: RESUME_FROM_CHECKPOINT requires VERIFY_VIDEO_DECODE=0. A filtered manifest can change data order; run a fresh verified full job instead."
+        exit 2
+    fi
+    if [[ ! -d "${resume_from_checkpoint}" || ! -s "${resume_from_checkpoint}/trainer_state.json" || ! -s "${resume_from_checkpoint}/latest" ]]; then
+        log "ERROR: resume checkpoint lacks trainer_state.json or DeepSpeed latest metadata: ${resume_from_checkpoint}"
+        exit 2
+    fi
+    resume_global_step="$(tr -d '[:space:]' < "${resume_from_checkpoint}/latest")"
+    if [[ ! "${resume_global_step}" =~ ^global_step[1-9][0-9]*$ ]]; then
+        log "ERROR: resume checkpoint has an invalid DeepSpeed latest tag: ${resume_global_step:-empty}"
+        exit 2
+    fi
+    resume_state_dir="${resume_from_checkpoint}/${resume_global_step}"
+    if [[ ! -d "${resume_state_dir}" ]]; then
+        log "ERROR: resume checkpoint state directory is unavailable: ${resume_state_dir}"
+        exit 2
+    fi
+    resume_model_shards="$(find "${resume_state_dir}" -maxdepth 1 -type f -name '*_model_states.pt' -size +0c | wc -l | tr -d '[:space:]')"
+    resume_optimizer_shards="$(find "${resume_state_dir}" -maxdepth 1 -type f -name '*_optim_states.pt' -size +0c | wc -l | tr -d '[:space:]')"
+    if (( resume_model_shards < nproc_per_node || resume_optimizer_shards < nproc_per_node )); then
+        log "ERROR: resume checkpoint has model_shards=${resume_model_shards}, optimizer_shards=${resume_optimizer_shards}; need at least ${nproc_per_node} of each"
+        exit 2
+    fi
+    log "resume preflight: ${resume_global_step}; model_shards=${resume_model_shards}; optimizer_shards=${resume_optimizer_shards}"
 fi
 case "${full_output_selected_token}" in
     1|true|TRUE) full_output_selected_token=true ;;
@@ -447,18 +664,33 @@ if (( ${#physical_gpus[@]} != nproc_per_node )); then
     log "ERROR: CUDA_VISIBLE_DEVICES=${cuda_visible_devices} exposes ${#physical_gpus[@]} cards, but ${nproc_per_node} are required"
     exit 2
 fi
-required_mib=$((min_free_gib * 1024))
+# Validate the exact GPU identity before touching an external keep-alive. A
+# configured keep-alive normally occupies the requested cards, so it must be
+# safely paused before the free-memory gate is evaluated.
 for physical_gpu in "${physical_gpus[@]}"; do
     if [[ ! "${physical_gpu}" =~ ^[0-9]+$ ]]; then
         log "ERROR: CUDA_VISIBLE_DEVICES must contain physical numeric indices; got '${physical_gpu}'"
         exit 2
     fi
     gpu_name="$(nvidia-smi --id="${physical_gpu}" --query-gpu=name --format=csv,noheader | tr -d '\r')"
-    free_mib="$(nvidia-smi --id="${physical_gpu}" --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')"
     if [[ "${gpu_name}" != *"${expected_gpu_name}"* ]]; then
         log "ERROR: GPU ${physical_gpu} is ${gpu_name}; expected a ${expected_gpu_name} profile. Do not silently switch to B200."
         exit 2
     fi
+done
+
+if (( keepalive_configured == 1 )); then
+    find_external_keepalive
+    if (( ${#keepalive_pids[@]} > 0 )); then
+        log "detected pre-existing all-GPU keep-alive pid(s): ${keepalive_pids[*]}; pausing it before the free-memory gate"
+        pause_external_keepalive
+    fi
+fi
+
+required_mib=$((min_free_gib * 1024))
+for physical_gpu in "${physical_gpus[@]}"; do
+    gpu_name="$(nvidia-smi --id="${physical_gpu}" --query-gpu=name --format=csv,noheader | tr -d '\r')"
+    free_mib="$(nvidia-smi --id="${physical_gpu}" --query-gpu=memory.free --format=csv,noheader,nounits | tr -d '[:space:]')"
     if [[ ! "${free_mib}" =~ ^[0-9]+$ ]] || (( free_mib < required_mib )); then
         log "ERROR: GPU ${physical_gpu} has ${free_mib:-unknown} MiB free; need at least ${required_mib} MiB"
         exit 2
@@ -469,14 +701,6 @@ done
 # Make the subsequent Python preflight see exactly the four validated cards.
 export CUDA_VISIBLE_DEVICES="${cuda_visible_devices}"
 
-if (( keepalive_configured == 1 )); then
-    find_external_keepalive
-    if (( ${#keepalive_pids[@]} > 0 )); then
-        log "detected pre-existing all-GPU keep-alive pid(s): ${keepalive_pids[*]}; it is not part of this launcher"
-        pause_external_keepalive
-    fi
-fi
-
 export PYTHONNOUSERSITE=1
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -484,61 +708,199 @@ export WANDB_MODE=offline
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/open_r1:${project_root}/src/r1-v/src:${project_root}/src/qwen-vl-utils/src${PYTHONPATH:+:${PYTHONPATH}}"
 export GRPO_EXPECTED_GPU_COUNT="${nproc_per_node}"
+export FORCE_QWENVL_VIDEO_READER="${video_reader_backend}"
+export VIDEO_KTR_RANK_TRACE="${rank_phase_trace}"
+export DEEPSPEED_TIMEOUT="${DEEPSPEED_TIMEOUT:-${deepspeed_timeout_minutes}}"
+if [[ "${nccl_diagnostics}" == "true" ]]; then
+    # Blocking waits disable the watchdog in this PyTorch build, which would
+    # suppress the very timeout dump needed to identify a rank divergence.
+    unset TORCH_NCCL_BLOCKING_WAIT NCCL_BLOCKING_WAIT
+    export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
+    export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
+    export TORCH_NCCL_DESYNC_DEBUG="${TORCH_NCCL_DESYNC_DEBUG:-1}"
+    export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-4096}"
+    export TORCH_NCCL_TRACE_CPP_STACK="${TORCH_NCCL_TRACE_CPP_STACK:-1}"
+    export TORCH_NCCL_ENABLE_MONITORING="${TORCH_NCCL_ENABLE_MONITORING:-1}"
+    export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
+    export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-900}"
+    export TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC="${TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC:-60000}"
+    export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+    mkdir -p "${run_root}/nccl"
+    {
+        printf 'TORCH_DISTRIBUTED_DEBUG=%s\n' "${TORCH_DISTRIBUTED_DEBUG}"
+        printf 'TORCH_NCCL_ASYNC_ERROR_HANDLING=%s\n' "${TORCH_NCCL_ASYNC_ERROR_HANDLING}"
+        printf 'TORCH_NCCL_DESYNC_DEBUG=%s\n' "${TORCH_NCCL_DESYNC_DEBUG}"
+        printf 'TORCH_NCCL_TRACE_BUFFER_SIZE=%s\n' "${TORCH_NCCL_TRACE_BUFFER_SIZE}"
+        printf 'TORCH_NCCL_TRACE_CPP_STACK=%s\n' "${TORCH_NCCL_TRACE_CPP_STACK}"
+        printf 'TORCH_NCCL_ENABLE_MONITORING=%s\n' "${TORCH_NCCL_ENABLE_MONITORING}"
+        printf 'TORCH_NCCL_DUMP_ON_TIMEOUT=%s\n' "${TORCH_NCCL_DUMP_ON_TIMEOUT}"
+        printf 'TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=%s\n' "${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC}"
+        printf 'TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC=%s\n' "${TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC}"
+        printf 'NCCL_DEBUG=%s\n' "${NCCL_DEBUG}"
+        printf 'DEEPSPEED_TIMEOUT=%s\n' "${DEEPSPEED_TIMEOUT}"
+    } > "${run_root}/nccl/nccl_env.txt"
+    log "NCCL diagnostics enabled: rank traces=${rank_phase_trace}; timeout=${ddp_timeout_seconds}s; flight-recorder artifacts will be retained under ${run_root}"
+fi
 source_provenance="${run_root}/source_provenance.txt"
 write_source_provenance "${source_provenance}"
 
-log "phase 2/6: verifying imports before full model loading"
-"${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
-import os
-import torch
-import transformers
-import tokenizers
-import trl
-from trainer.video_ktr_grpo_trainer import VideoKTRGRPOTrainer
-
-expected = int(os.environ["GRPO_EXPECTED_GPU_COUNT"])
-assert torch.cuda.is_available(), "CUDA is unavailable"
-assert torch.cuda.device_count() == expected, (torch.cuda.device_count(), expected)
-assert transformers.__version__ == "4.49.0.dev0", transformers.__version__
-assert tokenizers.__version__ == "0.21.4", tokenizers.__version__
-assert trl.__version__ == "0.16.0", trl.__version__
-print(
-    "[full-preflight] "
-    f"torch={torch.__version__}; transformers={transformers.__version__}; "
-    f"trl={trl.__version__}; devices={[torch.cuda.get_device_name(i) for i in range(expected)]}; "
-    f"trainer={VideoKTRGRPOTrainer.__module__}",
-    flush=True,
-)
-PY
+log "phase 2/7: verifying imports before full model loading"
+run_logged_preflight "import gate" "${python_bin}" -u "${import_preflight_program}"
 append_runtime_provenance "${source_provenance}"
 
-if [[ "${prepared_dataset_only}" == "1" ]]; then
+if [[ "${prepared_dataset_only}" == "true" ]]; then
     if [[ ! -f "${dataset_json}" ]]; then
         log "ERROR: USE_EXISTING_PREPARED_DATASET=1 but dataset is unavailable: ${dataset_json}"
         exit 2
     fi
-    log "phase 3/6: reusing prepared path-verified video dataset ${dataset_json}"
+    log "phase 3/7: reusing prepared path-verified video dataset ${dataset_json}"
 else
-    log "phase 3/6: filtering all Video-R1 records to path-present, non-empty video samples; progress follows every 5,000 records"
-    "${python_bin}" -u "${project_root}/src/grpo_prepare_dataset.py" \
+    log "phase 3/7: filtering all Video-R1 records to path-present, non-empty video samples; progress follows every 5,000 records"
+    run_logged_preflight "path dataset preparation" "${python_bin}" -u "${project_root}/src/grpo_prepare_dataset.py" \
         --source "${dataset_source}" \
         --video-root "${data_root}" \
         --output "${dataset_json}" \
         --data-type video \
-        --progress-every 5000 \
-        2>&1 | tee -a "${run_root}/terminal.log"
+        --progress-every 5000
 fi
 
+training_dataset_json="${dataset_json}"
+decoder_source_records="not_run"
+decoder_verified_records="not_run"
+decoder_rejected_records="not_run"
+decoder_timed_out_records="not_run"
+decoder_source_sha256="not_run"
+decoder_output_sha256="not_run"
+if [[ "${verify_video_decode}" == "true" ]]; then
+    decoder_manifest="${decoder_verified_dataset}.manifest.json"
+    if [[ "${reuse_decoder_verified_dataset}" == "true" ]]; then
+        if [[ ! -f "${decoder_verified_dataset}" || ! -f "${decoder_manifest}" ]]; then
+            log "ERROR: requested decoder-verified dataset or manifest is unavailable: ${decoder_verified_dataset}"
+            exit 2
+        fi
+        log "phase 4/7: reusing decoder-verified qwen video manifest ${decoder_verified_dataset}"
+    else
+        log "phase 4/7: qwen video preprocessing verification (workers=${decoder_workers}, hard timeout=${decoder_timeout_seconds}s); progress/ETA follows every ${decoder_status_seconds}s"
+        run_logged_preflight "qwen video preprocessing verification" env CUDA_VISIBLE_DEVICES="" "${python_bin}" -u "${project_root}/src/grpo_verify_video_decode.py" \
+            --source "${dataset_json}" \
+            --video-root "${data_root}" \
+            --output "${decoder_verified_dataset}" \
+            --nframes "${nframes}" \
+            --max-pixels "${max_pixels}" \
+            --reader-backend "${video_reader_backend}" \
+            --workers "${decoder_workers}" \
+            --timeout-seconds "${decoder_timeout_seconds}" \
+            --progress-every "${decoder_progress_every}" \
+            --status-seconds "${decoder_status_seconds}"
+    fi
+    decoder_manifest_values_file="${run_root}/decoder_manifest_validation.values"
+    if ! "${python_bin}" - "${decoder_manifest}" "${dataset_json}" "${decoder_verified_dataset}" "${nframes}" "${max_pixels}" "${video_reader_backend}" "${data_root}" > "${decoder_manifest_values_file}" 2> >(tee -a "${run_root}/terminal.log" >&2) <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+manifest_path, source_path, output_path, nframes, max_pixels, backend, video_root = sys.argv[1:]
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+manifest_file = Path(manifest_path)
+source = Path(source_path)
+output = Path(output_path)
+manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+rejection_file = Path(str(manifest.get("rejection_file", "")))
+checks = {
+    "status": manifest.get("status") == "passed",
+    "source_path": Path(str(manifest.get("source", ""))).resolve() == source.resolve(),
+    "source_sha256": manifest.get("source_sha256") == sha256(source),
+    "video_root": Path(str(manifest.get("video_root", ""))).resolve() == Path(video_root).resolve(),
+    "output_path": Path(str(manifest.get("output", ""))).resolve() == output.resolve(),
+    "output_sha256": manifest.get("output_sha256") == sha256(output),
+    "decoder": manifest.get("decoder") == "qwen_vl_utils.vision_process.fetch_video",
+    "reader_backend": manifest.get("reader_backend") == backend,
+    "qwen_preprocess": manifest.get("qwen_preprocess") is True,
+    "nframes": int(manifest.get("nframes", -1)) == int(nframes),
+    "max_pixels": int(manifest.get("max_pixels", -1)) == int(max_pixels),
+    "rejection_file": rejection_file.is_file(),
+    "rejection_file_sha256": rejection_file.is_file() and manifest.get("rejection_file_sha256") == sha256(rejection_file),
+}
+failed = [name for name, passed in checks.items() if not passed]
+if failed:
+    raise RuntimeError("decoder manifest does not match this launch: " + ", ".join(failed))
+for key in ("source_records", "verified_records", "rejected_records", "timed_out_records"):
+    if not isinstance(manifest.get(key), int) or manifest[key] < 0:
+        raise RuntimeError(f"decoder manifest has invalid {key}")
+if manifest["verified_records"] + manifest["rejected_records"] != manifest["source_records"]:
+    raise RuntimeError("decoder manifest record counts do not balance")
+print(
+    "\t".join(
+        str(manifest[key])
+        for key in ("source_records", "verified_records", "rejected_records", "timed_out_records")
+    )
+    + "\t"
+    + str(manifest["source_sha256"])
+    + "\t"
+    + str(manifest["output_sha256"])
+)
+PY
+    then
+        log "ERROR: decoder manifest validation failed for ${decoder_manifest}; detailed stderr is in terminal.log"
+        exit 2
+    fi
+    decoder_manifest_values="$(<"${decoder_manifest_values_file}")"
+    IFS=$'\t' read -r decoder_source_records decoder_verified_records decoder_rejected_records decoder_timed_out_records decoder_source_sha256 decoder_output_sha256 <<< "${decoder_manifest_values}"
+    training_dataset_json="${decoder_verified_dataset}"
+    if [[ "${decoder_rejected_records}" != "0" ]]; then
+        log "WARNING: decoder verification rejected ${decoder_rejected_records} record(s); this is a data-quality-filtered reproduction, not a bit-for-bit full-data run. See ${decoder_manifest} and its rejections file."
+    else
+        log "decoder verification retained all ${decoder_verified_records} records in source order"
+    fi
+else
+    log "phase 4/7: decoder verification is disabled; using the path-verified dataset unchanged"
+fi
+
+prepared_dataset_sha256="$(sha256sum "${dataset_json}" | awk '{print $1}')"
+training_dataset_sha256="$(sha256sum "${training_dataset_json}" | awk '{print $1}')"
 {
     printf 'run_root=%s\nvariant=%s\n' "${run_root}" "${variant}"
     printf 'cuda_visible_devices=%s\nmodel_path=%s\ndata_root=%s\n' "${cuda_visible_devices}" "${model_path}" "${data_root}"
-    printf 'dataset_source=%s\ndataset_json=%s\n' "${dataset_source}" "${dataset_json}"
+    printf 'dataset_source=%s\nprepared_dataset_json=%s\nprepared_dataset_sha256=%s\ntraining_dataset_json=%s\ntraining_dataset_sha256=%s\n' "${dataset_source}" "${dataset_json}" "${prepared_dataset_sha256}" "${training_dataset_json}" "${training_dataset_sha256}"
+    printf 'verify_video_decode=%s\nreader_backend=%s\ndecoder_verified_dataset=%s\ndecoder_manifest=%s\ndecoder_source_records=%s\ndecoder_verified_records=%s\ndecoder_rejected_records=%s\ndecoder_timed_out_records=%s\ndecoder_source_sha256=%s\ndecoder_output_sha256=%s\n' "${verify_video_decode}" "${video_reader_backend}" "${decoder_verified_dataset}" "${decoder_manifest:-not_run}" "${decoder_source_records}" "${decoder_verified_records}" "${decoder_rejected_records}" "${decoder_timed_out_records}" "${decoder_source_sha256}" "${decoder_output_sha256}"
     printf 'max_steps=%s\nmax_prompt_length=%s\nmax_completion_length=%s\nnum_generations=%s\n' "${max_steps}" "${max_prompt_length}" "${max_completion_length}" "${num_generations}"
     printf 'nframes=%s\nmax_pixels=%s\ntemporal_permutations=%s\nattn_implementation=%s\n' "${nframes}" "${max_pixels}" "${temporal_permutations}" "${attn_implementation}"
     printf 'save_steps=%s\nsave_total_limit=%s\nselection_mode=paper\nselection_scope=per_completion\n' "${save_steps}" "${save_total_limit}"
+    printf 'ddp_timeout_seconds=%s\ndeepspeed_timeout_minutes=%s\nnccl_diagnostics=%s\nrank_phase_trace=%s\nds3_gather_for_generation=%s\nskip_final_model_save=%s\n' "${ddp_timeout_seconds}" "${deepspeed_timeout_minutes}" "${nccl_diagnostics}" "${rank_phase_trace}" "${ds3_gather_for_generation}" "${skip_final_model_save}"
+    printf 'preflight_only=%s\n' "${preflight_only}"
+    printf 'resume_from_checkpoint=%s\nresume_global_step=%s\n' "${resume_from_checkpoint:-none}" "${resume_global_step:-none}"
 } > "${run_root}/launch_config.txt"
 
-log "phase 4/6: starting full ${variant} training; heartbeat follows every ${heartbeat_seconds}s"
+if [[ "${preflight_only}" == "true" ]]; then
+    "${python_bin}" - "${run_root}/preflight_complete.json" "${variant}" "${training_dataset_json}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+destination, variant, dataset = sys.argv[1:]
+payload = {
+    "event": "preflight_complete",
+    "completed_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "variant": variant,
+    "training_dataset_json": dataset,
+    "torchrun_started": False,
+}
+Path(destination).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+    log "phase 5/7: PREFLIGHT_ONLY=1 passed; torchrun was intentionally not started"
+    exit 0
+fi
+
+log "phase 5/7: starting full ${variant} training; terminal receives rank 0 progress and a GPU heartbeat every ${heartbeat_seconds}s"
 training_started="$(date +%s.%N)"
 "${python_bin}" -u "${project_root}/src/grpo_resource_monitor.py" \
     --output "${run_root}/gpu_metrics.jsonl" \
@@ -555,11 +917,16 @@ if [[ "${variant}" == "ktr" ]]; then
 fi
 
 command=(
-    "${python_bin}" -u -m torch.distributed.run --standalone --nproc_per_node="${nproc_per_node}"
+    "${python_bin}" -u -m torch.distributed.run
+    --standalone
+    --nproc_per_node="${nproc_per_node}"
+    --log-dir "${run_root}/torchrun-logs"
+    --tee 3
+    --local-ranks-filter 0
     "${trainer_program}"
     --output_dir "${run_root}/training"
     --model_name_or_path "${model_path}"
-    --dataset_name "${dataset_json}"
+    --dataset_name "${training_dataset_json}"
     --dataset_train_split train
     --deepspeed "${deepspeed_config}"
     --max_steps "${max_steps}"
@@ -588,7 +955,9 @@ command=(
     --save_steps "${save_steps}"
     --save_total_limit "${save_total_limit}"
     --save_only_model false
-    --skip_final_model_save false
+    --skip_final_model_save "${skip_final_model_save}"
+    --ddp_timeout "${ddp_timeout_seconds}"
+    --ds3_gather_for_generation "${ds3_gather_for_generation}"
     --report_to none
     --remove_unused_columns false
     --use_vllm false
@@ -610,7 +979,10 @@ if [[ -n "${resume_from_checkpoint}" ]]; then
 fi
 
 set +e
-"${command[@]}" > >(tee -a "${run_root}/training.log") 2>&1 &
+(
+    cd "${run_root}"
+    exec "${command[@]}"
+) > >(tee -a "${run_root}/training.log") 2>&1 &
 training_pid="$!"
 wait "${training_pid}"
 training_exit="$?"
@@ -622,7 +994,7 @@ stop_child "${monitor_pid}"
 heartbeat_pid=""
 monitor_pid=""
 
-log "phase 5/6: writing duration, memory, and utilization summary"
+log "phase 6/7: writing duration, memory, and utilization summary"
 write_summary
 if (( training_exit != 0 )); then
     log "full ${variant} training failed with exit=${training_exit}"
@@ -633,4 +1005,4 @@ if [[ ! -f "${run_root}/training/training_complete.json" ]]; then
     exit 4
 fi
 
-log "phase 6/6: PASS. Inspect ${run_root}/training_summary.md and ${run_root}/training/training_complete.json"
+log "phase 7/7: PASS. Inspect ${run_root}/training_summary.md and ${run_root}/training/training_complete.json"

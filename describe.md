@@ -39,18 +39,38 @@ direct GRPO backward / optimizer，并记录耗时、显存和利用率
 
 为规避当前 FlashAttention2/mRoPE 的 dtype 兼容问题，验证过的 launcher 默认使用 `ATTN_IMPLEMENTATION=sdpa`。
 
+## 已结束的 full 故障与当前修复
+
+旧探索性 full 已在约 `global_step=529` 结束：rank 1/2/3 等待下一次 ZeRO collective，rank 0 停在前一 collective，且显存未到 OOM 范围。最高置信推断是 rank 0 在 generation 前的 whole-file 视频预处理停住；这仍需新的短恢复实际回归验证，不能写成已证明的唯一根因。
+
+修复后的 launcher 默认先以训练相同的 Qwen/torchvision 视频预处理做 CPU-only、可终止子进程 decode verification；它实时显示吞吐/ETA，写入绑定 source SHA、video root、backend、帧数与像素配置的 manifest/rejection JSON。可恢复的媒体错误才会被过滤；worker 异常退出或 0 条通过会 fail-fast 并保留诊断证据。训练期会保留 rank 0 实时进度、GPU heartbeat、四个 rank 日志；诊断模式还会写每 rank phase trace 和 NCCL timeout 证据。若 decoder 过滤任何视频，结果只能称为“数据质量过滤后的降级复现”。
+
 ## 完整验证
 
-full 由操作者在 GPU 机器手动启动。脚本不含私有路径默认值，先显式设置 `MODEL_PATH=<MODEL_ROOT>/Video-R1/Qwen2.5-VL-7B-COT-SFT` 与 `DATA_ROOT=<DATA_ROOT>`；当前离线 wheelhouse 依赖基础 GPU image 的显式 import gate。clean Python 在本版本不受支持：完整离线依赖 bundle 还必须配合后续扩展并验证的 full-overlay 安装模式，不能绕过 gate 或联网补包。若节点有外部保活，还必须同时设置 `KEEPALIVE_MAIN=<KEEPALIVE_MAIN>`、`KEEPALIVE_LAUNCHER=<KEEPALIVE_LAUNCHER>` 后才可传入暂停授权：
+full 由操作者在 GPU 机器手动启动。脚本不含私有路径默认值，先显式设置 `MODEL_PATH=<MODEL_ROOT>/Video-R1/Qwen2.5-VL-7B-COT-SFT` 与 `DATA_ROOT=<DATA_ROOT>`；`RUN_ROOT` 必须是不存在的新目录，且 `NFRAMES` 必须为不少于 2 的偶数。当前离线 wheelhouse 依赖基础 GPU image 的显式 import gate。clean Python 在本版本不受支持：完整离线依赖 bundle 还必须配合后续扩展并验证的 full-overlay 安装模式，不能绕过 gate 或联网补包。若节点有外部保活，还必须同时设置 `KEEPALIVE_MAIN=<KEEPALIVE_MAIN>`、`KEEPALIVE_LAUNCHER=<KEEPALIVE_LAUNCHER>` 后才可传入暂停授权；授权后会在显存 gate 前精确暂停该保活：
 
 ```bash
 cd <REPO_ROOT>
-VARIANT=ktr ./run_full.sh
+VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-decoder-verified-<UTC> ./run_full.sh
 ```
 
 有已配置且获准暂停的外部保活时，才使用 `ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr ./run_full.sh`。
 
-脚本会筛选路径存在且非空的视频、连续输出进度与 GPU heartbeat、写入训练时长/显存/利用率和源码 provenance；它不会把该筛选误称为全量解码成功。配置了外部保活控制时，结束后会自动恢复此前验证性暂停的保活，并在末尾打印人工兜底命令；未配置时会说明没有恢复命令：
+先用 checkpoint-500 做恢复诊断，才建议启动上述正式 full：
+
+```bash
+old_run=<ARTIFACT_ROOT>/ktr-20260921T131854Z
+VARIANT=ktr \
+RUN_ROOT=<ARTIFACT_ROOT>/ktr-checkpoint500-diag-<UTC> \
+PREPARED_DATASET="${old_run}/Video-R1-260k-video-verified.json" \
+USE_EXISTING_PREPARED_DATASET=1 \
+RESUME_FROM_CHECKPOINT="${old_run}/training/checkpoint-500" \
+VERIFY_VIDEO_DECODE=0 MAX_STEPS=540 SKIP_FINAL_MODEL_SAVE=true \
+NCCL_DIAGNOSTICS=1 RANK_PHASE_TRACE=1 \
+./run_full.sh
+```
+
+脚本会先筛选路径、随后默认做全量 decoder verification，并连续输出验证 ETA 与训练 heartbeat；写入训练时长/显存/利用率、源码和数据 provenance。历史 full 输入均为 video，诊断恢复会在终端确认使用父类 `RandomSampler`，以保持 checkpoint 的取样契约。预检与训练均被 launcher 跟踪；收到中断时会先停止它们，才恢复此前验证性暂停的保活。NCCL watchdog dump 应从 `training.log`/`torchrun-logs` 与 rank trace 分析，不应假定有可直接传给 `fr_trace.py` 的磁盘文件。未配置保活时会说明没有恢复命令：
 
 ```bash
 bash <KEEPALIVE_LAUNCHER>

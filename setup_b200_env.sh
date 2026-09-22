@@ -232,6 +232,50 @@ PY
 )
 (( ${#platform_sites[@]} > 0 )) || die "B200 base Python has no usable site-packages directory below ${platform_prefix}"
 
+# The selected image can expose its CUDA packages through a secondary prefix
+# (for example, a platform .pth pointing at /usr/local) even though the base
+# interpreter itself lives under /opt.  A blanket secondary site-packages
+# path would also expose unrelated packages such as a non-NVIDIA ``apex``
+# module, which Transformers mistakes for Apex AMP.  Build a tiny durable
+# bridge containing only the CUDA-coupled modules and their metadata.
+platform_bridge="${b200_root}/platform-runtime-bridge"
+mkdir -p "${platform_bridge}"
+mapfile -t platform_runtime_sources < <(PYTHONWARNINGS=ignore "${base_python}" - <<'PY'
+from importlib import import_module, metadata
+from pathlib import Path
+
+specification = (
+    ("torch", "torch"),
+    ("torchvision", "torchvision"),
+    ("flash_attn", "flash-attn"),
+    ("flash_attn_2_cuda", "flash-attn"),
+)
+seen: set[Path] = set()
+for module_name, distribution_name in specification:
+    module = import_module(module_name)
+    module_path = Path(module.__file__).resolve()
+    source = module_path.parent if module_path.name == "__init__.py" else module_path
+    distribution = Path(metadata.distribution(distribution_name)._path).resolve()
+    for path in (source, distribution):
+        if not path.exists() or path in seen:
+            continue
+        seen.add(path)
+        print(path)
+PY
+)
+(( ${#platform_runtime_sources[@]} > 0 )) || die "could not discover the platform CUDA runtime modules"
+for source_path in "${platform_runtime_sources[@]}"; do
+    [[ "${source_path}" == /* && -e "${source_path}" ]] \
+        || die "invalid platform CUDA runtime source: ${source_path}"
+    bridge_entry="${platform_bridge}/$(basename "${source_path}")"
+    if [[ -e "${bridge_entry}" || -L "${bridge_entry}" ]]; then
+        [[ "$(realpath -e "${bridge_entry}")" == "$(realpath -e "${source_path}")" ]] \
+            || die "platform runtime bridge entry points at an unexpected source: ${bridge_entry}"
+    else
+        ln -s "${source_path}" "${bridge_entry}"
+    fi
+done
+
 # The source checkout deliberately wins over an arbitrary PyPI qwen-vl-utils
 # release, while the pinned venv packages win over the B200 image's newer
 # Transformers stack.  The .pth is durable and applies to torchrun workers.
@@ -246,7 +290,7 @@ mv -f "${pth_tmp}" "${pth_file}"
 
 platform_pth_file="${venv_site}/video_ktr_platform_runtime.pth"
 platform_pth_tmp="${platform_pth_file}.tmp.$$"
-printf '%s\n' "${platform_sites[@]}" > "${platform_pth_tmp}"
+printf '%s\n' "${platform_sites[@]}" "${platform_bridge}" > "${platform_pth_tmp}"
 mv -f "${platform_pth_tmp}" "${platform_pth_file}"
 
 mkdir -p "${b200_root}/.pip-cache" "${b200_root}/.pip-tmp" "$(dirname "${manifest_path}")"
@@ -348,6 +392,7 @@ export B200_ENV_COMPAT_WHEELHOUSE="${compat_wheelhouse}"
 export B200_ENV_GRPO_WHEELHOUSE="${grpo_wheelhouse}"
 export B200_ENV_GPU_MODE="${gpu_mode}"
 export B200_ENV_PLATFORM_PREFIX="${platform_prefix}"
+export B200_ENV_PLATFORM_BRIDGE="${platform_bridge}"
 export B200_ENV_GPU_RUNTIME_CHECK="${gpu_runtime_check}"
 
 log "running import, pinned-version, vendored-source, and FlashAttention-2 gates"
@@ -387,6 +432,7 @@ gpu_mode = os.environ["B200_ENV_GPU_MODE"] == "1"
 gpu_runtime_check = os.environ["B200_ENV_GPU_RUNTIME_CHECK"] == "1"
 manifest_path = Path(os.environ["B200_ENV_MANIFEST_PATH"])
 platform_prefix = Path(os.environ["B200_ENV_PLATFORM_PREFIX"]).resolve()
+platform_bridge = Path(os.environ["B200_ENV_PLATFORM_BRIDGE"]).resolve()
 
 expected = {
     "transformers": "4.49.0.dev0",
@@ -420,10 +466,14 @@ def starts_under(path, parent):
 for package, module in (("transformers", transformers), ("tokenizers", tokenizers), ("av", av), ("huggingface_hub", huggingface_hub)):
     if not starts_under(module.__file__, venv_dir):
         raise SystemExit(f"{package} did not resolve from isolated venv: {module.__file__}")
+if str(platform_bridge) not in sys.path:
+    raise SystemExit(f"platform CUDA runtime bridge is absent from sys.path: {platform_bridge}")
+if any(path.startswith("/usr/local/lib/python") and path.endswith("dist-packages") for path in sys.path):
+    raise SystemExit("unexpected global /usr/local site-packages leaked into the isolated venv")
 for package, module in (("torch", torch), ("torchvision", torchvision), ("flash_attn", flash_attn)):
-    if starts_under(module.__file__, venv_dir) or not starts_under(module.__file__, platform_prefix):
+    if starts_under(module.__file__, venv_dir):
         raise SystemExit(
-            f"{package} must resolve from the selected B200 platform runtime, not the venv: {module.__file__}"
+            f"{package} must resolve from the selected B200 platform runtime bridge, not the venv: {module.__file__}"
         )
 
 vendored_qwen = repo_root / "src" / "qwen-vl-utils" / "src"
@@ -517,6 +567,7 @@ payload = {
     "python_executable": sys.executable,
     "venv": str(venv_dir),
     "platform_prefix": str(platform_prefix),
+    "platform_bridge": str(platform_bridge),
     "versions": observed,
     "torch": {"version": torch.__version__, "cuda": torch.version.cuda, "file": torch.__file__},
     "torchvision": {"version": torchvision.__version__, "file": torchvision.__file__},

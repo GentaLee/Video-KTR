@@ -377,7 +377,11 @@ print(
 )
 PY
 
-flash_binary="$(find "$(dirname "$("${python_bin}" -c 'import flash_attn; print(flash_attn.__file__)')")" -type f -name '*cuda*.so' -print -quit)"
+# The FA2 CUDA extension is commonly a top-level module rather than a file
+# beneath the Python ``flash_attn`` package.  Resolve it through the module
+# loader so an isolated runtime bridge cannot make this gate miss a valid FA2
+# binary (or pass against a different package directory).
+flash_binary="$("${python_bin}" -c 'import flash_attn_2_cuda; print(flash_attn_2_cuda.__file__)')"
 if [[ -z "${flash_binary}" ]] || ! strings "${flash_binary}" | grep -q 'sm_100'; then
     log "ERROR: installed FlashAttention-2 binary does not advertise sm_100; do not silently fall back to a different attention backend"
     exit 2

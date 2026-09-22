@@ -61,6 +61,12 @@ assert _helper_spec is not None and _helper_spec.loader is not None
 ktr_token_utils = importlib.util.module_from_spec(_helper_spec)
 _helper_spec.loader.exec_module(ktr_token_utils)
 
+VERIFIER = ROOT / "src" / "grpo_verify_video_decode.py"
+_verifier_spec = importlib.util.spec_from_file_location("video_decode_verifier_under_test", VERIFIER)
+assert _verifier_spec is not None and _verifier_spec.loader is not None
+video_decode_verifier = importlib.util.module_from_spec(_verifier_spec)
+_verifier_spec.loader.exec_module(video_decode_verifier)
+
 
 class TokenEntropyTests(unittest.TestCase):
     def test_entropy_matches_uniform_and_near_deterministic_distributions(self) -> None:
@@ -182,6 +188,14 @@ class DatasetPathSafetyTests(unittest.TestCase):
             self.assertIsNone(resolve_media_path(root, "../safe.mp4"))
             self.assertIsNone(resolve_media_path(root, "nested/../safe.mp4"))
             self.assertIsNone(resolve_media_path(root, "/safe.mp4"))
+
+
+class DecoderVerifierConfigurationTests(unittest.TestCase):
+    def test_nframes_matches_qwen_even_frame_contract(self) -> None:
+        self.assertEqual(video_decode_verifier._even_nframes("8"), 8)
+        for value in ("0", "1", "9"):
+            with self.assertRaises(Exception):
+                video_decode_verifier._even_nframes(value)
 
 
 class ModalityBlockSamplerTests(unittest.TestCase):

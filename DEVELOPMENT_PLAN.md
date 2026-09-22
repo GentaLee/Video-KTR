@@ -19,7 +19,7 @@
 | 4×H200 baseline smoke | 历史通过 | 真实 generate → forward → backward → optimizer，`global_step=1`；长度奖励修复前，不能作最终 paired 对比 |
 | 4×H200 KTR smoke | 历史通过 | 三类 CoT token、union mask、真实优化步已验证；修复后须与 baseline 同 commit 重跑 |
 | full 同形状 KTR 容量 smoke | 历史通过（容量） | completion=512、时序置换=5 的真实优化步通过，峰值 92,197 MiB/卡；不作修复后 paired 对比 |
-| 完整 video full run | 动态状态（探索性） | 已在修复前 dirty source 启动；不为提交而中断，不能与修复后 baseline 作结论性对比 |
+| 旧完整 video full run | 已失败，待回归诊断 | 在约 step 529 出现 rank 间 collective timeout；checkpoint-500 可用于仅定位的短恢复，不能作正式结果 |
 | baseline 与 KTR 的完整对比 | 待手动启动 | 两个 full run 都完成后生成 `comparison.md/json` |
 
 这里的 smoke 只证明链路、资源配置和一小步更新可执行；它不等同于完整训练收敛、任务正确率或跨数据集泛化结论。
@@ -79,14 +79,14 @@ U   = top20%(E) ∪ top20%(V) ∪ top20%(T)
 | GPU 节点 | 集群 2，4× NVIDIA H200，每卡物理显存约 143,771 MiB |
 | 模型 | `<MODEL_ROOT>/Video-R1/Qwen2.5-VL-7B-COT-SFT`，本地 BF16 checkpoint |
 | 完整标注 | `<DATA_ROOT>/Video-R1-260k.json`，263,071 条记录 |
-| full 输入 | launcher 在启动时重新解析并仅保留路径存在且非空的 video 记录；可筛出 116,248 条，**未做全量解码预检** |
+| full 输入 | launcher 先筛选路径存在且非空的 video（历史可筛出 116,248 条），默认再用训练同一 Qwen/torchvision 预处理进行隔离 decode verification；最终数目以本 run manifest 为准 |
 | Python overlay | `.python-packages-grpo/`：Transformers `4.49.0.dev0`、tokenizers `0.21.4`、TRL `0.16.0`、DeepSpeed `0.15.4`；wheelhouse 不是 clean-Python 完整依赖闭包 |
 | 基础运行时 | Python 3.12、PyTorch `2.10.0+cu128`、CUDA 12.8，以及 `numpy`/Pillow/huggingface-hub/filelock/packaging/PyYAML/requests/safetensors/tqdm/psutil/msgpack；`setup_grpo_env.sh` 会显式 gate |
 | 分布式配置 | `src/r1-v/local_scripts/zero3.json`，ZeRO-3、BF16、gradient checkpointing |
 
 容量结论应基于实测而非估算：在与 full 相同的 completion=512、5 次时序置换 profile 下，KTR 的单卡峰值为 92,197 MiB，距 H200 物理容量约有 51.6 GiB；full 脚本仍要求每张卡在启动前至少有 120 GiB 空闲，并在每次运行时重新检查。该证据足以支持 4×H200 启动 full，但仍不把单步 smoke 外推为完整 epoch 的无条件稳定性保证。
 
-8×B200 没有被切换：该节点目前不是即插即用环境，缺少本轮所需的模型、数据、overlay 与已验证的 direct trainer。`run_full.sh` 也会明确拒绝静默把已验证的 H200 profile 换成 B200。
+8×B200 没有被切换：已提供独立的 `setup_b200_env.sh` 与 `somke-b200.sh`，用于 GPFS 上隔离环境、FlashAttention2 `sm_100` gate 与 8-rank smoke，但它们目前只通过静态检查，尚未在候选节点完成真实硬件验证。当前 `run_full.sh` 仍会明确拒绝静默把已验证的 H200 profile 换成 B200。
 
 ## 4. 真实 smoke 结果
 
@@ -125,49 +125,95 @@ KTR 这一步的日志记录了 `E=202`、`V=202`、`T=202`、`U=360` 的 rank-l
 
 该历史容量 run 在结束时 PASS，且当时保活已恢复并验证。其资源摘要、训练完成记录和 CoT token 样例均为本地 artifact，路径契约见第 7 节；它没有新的启动时 provenance，也不承担修复后 paired 对比结论。
 
-## 5. 手动启动 full run
+## 5. 已定位的 full 故障与修复状态
 
-`run_full.sh` 是唯一建议的 full launcher。它会持续向终端输出阶段进度与 GPU heartbeat，同时写入 `terminal.log`；数据筛选阶段每 5,000 条记录打印进度，训练阶段默认每 30 秒打印每卡显存与利用率。
+旧探索性 KTR full 已停止，不存在本项目占卡训练进程。它不是 OOM：最高单卡观测约 115.7 GiB，低于 H200 的约 143.8 GiB。失败时 rank 1/2/3 在下一次 ZeRO-3 `_ALLGATHER_BASE` 等待约 30 分钟，而 rank 0 的最后 enqueue/complete 均停在前一 collective；同时 GPU 0 长时间近 0% 利用率、其余卡接近满载。
+
+这支持但**没有单独证明**下列最高置信假设：rank 0 在下一 collective 前的本地 Qwen 视频预处理停住。当前 reader 是 torchvision whole-file decode，旧 full manifest 只做路径/非空校验，因此异常或极慢视频可造成这种 rank 偏斜。
+
+| 修复 / 诊断 | 实现 | 已验证范围 |
+| --- | --- | --- |
+| 同一路径 decode preflight | `src/grpo_verify_video_decode.py` 在 CPU-only spawned worker 执行 Qwen `fetch_video`（decode、抽帧、resize）；超时后 TERM→KILL，不可杀死或意外 worker crash 则 fail-fast；即使 0 条通过也会留下 failed manifest/rejections | 真实 4-video smoke 为 4/4；16 worker、32-video 抽样为 32/32、0 timeout；0-valid 负向测试确认诊断产物仍会保留；不能外推全量耗时/零 rejection |
+| 训练/预检 reader 一致 | full 强制 `FORCE_QWENVL_VIDEO_READER=torchvision`，并把 source SHA、video root、decoder/backend、nframes/max-pixels 写入 manifest；`NFRAMES` gate 为不小于 2 的偶数 | 静态/非训练 decode smoke 已通过；错误 root 的 reuse manifest 会被拒绝 |
+| rank 轨迹 | `RANK_PHASE_TRACE=1` 时，`training/rank_trace_rank*.jsonl` 记录 decode、generate、policy、V/T、ref、metrics 边界 | 需 checkpoint-500 短恢复实际验证 |
+| generation / ZeRO 保护 | 多 rank 显式 `synced_gpus=True`，并将 `DS3_GATHER_FOR_GENERATION` 传至 TRL unwrap | unit test 覆盖 flag 实际传入；该项不修复 generation 前 decode stall |
+| NCCL 事后证据 | 默认 diagnostics、10 分钟 DDP timeout、per-rank torchrun log、NCCL trace/dump 与失败 marker；watchdog 的内存 trace 写入 rank stderr/log，而非虚构磁盘 `fr_trace.py` 输入 | launcher 静态检查通过；需故障 run 才会产生 dump |
+| resume 语义 | resume 强制新 run root、旧 path-verified JSON、关闭 decoder filtering，校验 4 rank checkpoint shards；历史全 video 数据集走父类 `RandomSampler`，不应用 mixed-modality block sampler | checkpoint-500 结构与历史 sampler contract 已只读核验；短恢复尚待人工执行，且只作故障回归，不作最终数值结果 |
+| launcher 安全预检 | `PREFLIGHT_ONLY=1` 完整执行容量/import/path/decode manifest，但明确不创建 `torchrun`；长预检为独立受跟踪 process group，已授权 keep-alive 会在空闲显存 gate **之前**按精确 PID 暂停 | 4 条真实视频预检通过，写 `preflight_complete.json`（`torchrun_started=false`）；在 decoder 阶段向唯一 launcher 发送 TERM 的测试确认 process group/worker 全部退出、无 GPU 残留 |
+
+全量预检会消耗 CPU/存储时间（16 worker 的 32 条抽样约一分钟，且样本并不代表全量）。它会每 30 秒显示吞吐和 ETA；这是正式安全 full 的前置阶段，不能为了省时在正式结果中悄悄跳过。若有 rejected record，输出必须称为“数据质量过滤后的降级复现”，并保留 manifest/rejections SHA；0 条通过或 worker crash 不是可继续训练的过滤结果，而是带证据的失败。
+
+历史 full 的 116,248 条输入均为 video。为 checkpoint-500 诊断复原其取样契约，直接 trainer 对单一 modality 委托父类 `RandomSampler`；使用历史 seed 的只读重建显示旧故障附近的下一 global batch（step 530）rank 0 对应 `problem_id=192684`。这让短恢复能覆盖具体疑点，但显式 generation 同步、额外 phase trace 和诊断环境仍使它只能作为回归定位，不能与正式 baseline/KTR 指标混合。
+
+## 6. 手动启动：先诊断恢复，再正式 full
+
+`run_full.sh` 是唯一建议的 full launcher，且 `RUN_ROOT` 必须是**尚不存在**的新目录（原子创建，旧 artifact 不会被追加）。它会持续向终端输出：path 筛选进度、decoder verification 的 30 秒吞吐/ETA、rank 0 的训练进度和 30 秒 GPU heartbeat；四个 rank 的完整标准流保存到 `torchrun-logs/`。
 
 脚本不再含私有机器路径默认值。先在本机 shell 显式配置（下面均为占位符）。当前 offline wheelhouse 依赖基础 GPU image 的显式 import gate；clean Python 在本版本不受支持：仅准备完整、版本锁定的辅助离线 bundle 仍不够，必须先扩展并验证 `setup_grpo_env.sh` 的 full-overlay 安装模式。不能让 GPU 节点联网补包；当前降级策略是继续使用已验证的 GPU image：
 
 ```bash
 export MODEL_PATH=<MODEL_ROOT>/Video-R1/Qwen2.5-VL-7B-COT-SFT
 export DATA_ROOT=<DATA_ROOT>
+# 默认 NFRAMES=8；如覆写，必须是 >=2 的偶数。
 ```
 
-没有外部保活时，先运行 KTR（**不设置** `ALLOW_PAUSE_EXTERNAL_KEEPALIVE`）：
+第一步只做 checkpoint-500 的受控诊断恢复（**不设置** `ALLOW_PAUSE_EXTERNAL_KEEPALIVE`，除非已按第 7 节显式配置）。它必须沿用下面指定的旧 path-verified JSON，关闭 decoder filtering；历史输入全为 video，因此终端会确认使用父类 `RandomSampler`。`MAX_STEPS=540` 只比旧 checkpoint 多跑约 40 个 global step，用于跨越旧故障点，不得作为正式结果：
 
 ```bash
 cd <REPO_ROOT>
-FULL_ROOT=<ARTIFACT_ROOT>/manual-$(date -u +%Y%m%dT%H%M%SZ)
-mkdir -p "${FULL_ROOT}"
+old_run=<ARTIFACT_ROOT>/ktr-20260921T131854Z
+diag_run=<ARTIFACT_ROOT>/ktr-checkpoint500-diag-$(date -u +%Y%m%dT%H%M%SZ)
 
 VARIANT=ktr \
-RUN_ROOT="${FULL_ROOT}/ktr" \
+RUN_ROOT="${diag_run}" \
+PREPARED_DATASET="${old_run}/Video-R1-260k-video-verified.json" \
+USE_EXISTING_PREPARED_DATASET=1 \
+RESUME_FROM_CHECKPOINT="${old_run}/training/checkpoint-500" \
+VERIFY_VIDEO_DECODE=0 \
+MAX_STEPS=540 \
+SKIP_FINAL_MODEL_SAVE=true \
+NCCL_DIAGNOSTICS=1 \
+RANK_PHASE_TRACE=1 \
 ./run_full.sh
 ```
 
-若节点有外部保活，再额外设置其两个身份并显式授权；两个变量缺任意一个时，launcher 会拒绝 `ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1`：
+若该诊断跨过旧故障点且结束为 PASS，再从 step 0 启动正式 KTR full。正式 full 默认 `VERIFY_VIDEO_DECODE=1`、16 worker、120 秒单视频硬超时；它会留下 verified JSON、完整 rejection JSON 和 manifest SHA。若 manifest 中 `rejected_records>0`，该 run 只能称为数据质量过滤后的降级复现：
+
+```bash
+full_root=<ARTIFACT_ROOT>/ktr-decoder-verified-$(date -u +%Y%m%dT%H%M%SZ)
+
+VARIANT=ktr \
+RUN_ROOT="${full_root}" \
+VERIFY_VIDEO_DECODE=1 \
+VIDEO_DECODE_WORKERS=16 \
+VIDEO_DECODE_TIMEOUT_SECONDS=120 \
+NCCL_DIAGNOSTICS=1 \
+RANK_PHASE_TRACE=0 \
+./run_full.sh
+```
+
+若节点有外部保活，以上任一命令前再额外设置其两个身份并显式授权；两个变量缺任意一个时，launcher 会拒绝暂停授权：
 
 ```bash
 export KEEPALIVE_MAIN=<KEEPALIVE_MAIN>
 export KEEPALIVE_LAUNCHER=<KEEPALIVE_LAUNCHER>
-ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT="${FULL_ROOT}/ktr" ./run_full.sh
+export ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1
 ```
 
-若需要完整可比的资源对照，在 KTR 成功结束后单独运行 baseline；不要让两个变体同时抢同一批 GPU：
+若需要完整可比的资源对照，在 KTR 成功结束后，使用相同 decoder policy 单独运行 baseline；不要让两个变体同时抢同一批 GPU：
 
 ```bash
 cd <REPO_ROOT>
 VARIANT=baseline \
-RUN_ROOT="${FULL_ROOT}/baseline" \
+RUN_ROOT=<ARTIFACT_ROOT>/baseline-decoder-verified-<UTC> \
+VERIFY_VIDEO_DECODE=1 \
+VIDEO_DECODE_WORKERS=16 \
 ./run_full.sh
 
 /usr/bin/python3.12 src/grpo_compare_runs.py \
-  --baseline-dir "${FULL_ROOT}/baseline" \
-  --ktr-dir "${FULL_ROOT}/ktr" \
-  --output-dir "${FULL_ROOT}/comparison" \
+  --baseline-dir <BASELINE_RUN_ROOT> \
+  --ktr-dir <KTR_RUN_ROOT> \
+  --output-dir <COMPARISON_ROOT> \
   --require-pass
 ```
 
@@ -179,15 +225,15 @@ RUN_ROOT=<ARTIFACT_ROOT>/debug-ktr-10 \
 ./run_full.sh
 ```
 
-full 完成的最低验收条件是：脚本零退出、`training/training_complete.json` 存在、`training_summary.md/json` 标为 succeeded、`source_provenance.txt` 存在，并且 `gpu_metrics.jsonl` 持续有采样记录。若跑 KTR 与 baseline 两个变体，还应确认二者 `source_provenance.txt` 的关键源码 hash/配置一致，再检查 `comparison/comparison.md` 中的时长、四卡最大峰值显存、利用率与 KTR 最后一步 token 指标。
+诊断最低验收条件是：终端出现 `[ktr] homogeneous dataset uses the parent RandomSampler`、`synced_gpus=True`、`phase 7/7: PASS`；`training/training_complete.json` 的 `global_step >= 540`，四份 `rank_trace_rank*.jsonl` 都跨过旧故障区域且不存在新的 timeout。若仍失败，应先看 `training.log`、`torchrun-logs/` 中 watchdog dump 与每 rank 的最后一条 phase trace；本 launcher 未写入可供 `fr_trace.py` 读取的独立文件，不能把它当作可执行的事后命令。正式 full 的最低验收条件是：脚本零退出、`training/training_complete.json` 存在、`training_summary.md/json` 标为 succeeded、`source_provenance.txt`、两层数据 manifest、`gpu_metrics.jsonl` 均存在。若跑 KTR 与 baseline 两个变体，还应确认二者源码 hash、reader/backend、decoder policy 和最终 dataset SHA 一致；有 filtering 的两个 run 不能因“名称相同”就假定训练语料相同。
 
-## 6. 外部保活的安全生命周期
+## 7. 外部保活的安全生命周期
 
 某些 GPU 节点有不属于本项目的 all-GPU keep-alive。只有同时配置 `KEEPALIVE_MAIN` 与 `KEEPALIVE_LAUNCHER` 后，full launcher 才能识别和管理它；未配置时脚本会明确提示“不检测/不控制”，操作者须自行确认没有冲突。配置后规则如下：
 
 1. 默认检测到它就拒绝启动，绝不悄悄重叠训练与保活。
-2. 只有显式传入 `ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1` 后，才会按精确 PID、`/proc` start ticks 和命令行校验，发送 `TERM`；不使用 `pkill` 或 `SIGKILL`。
-3. 正常结束、失败、`INT`、`TERM` 都会先停止并等待 launcher 所追踪的 `torchrun`，然后才恢复原始保活 launcher；恢复最多等待 30 秒并验证 `main.py` 进程。
+2. 只有显式传入 `ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1` 后，才会按精确 PID、`/proc` start ticks 和命令行校验，发送 `TERM`；暂停发生在 GPU 型号核验之后、空闲显存 gate 之前，不使用 `pkill` 或 `SIGKILL`。
+3. 正常结束、失败、`INT`、`TERM` 都会先停止并等待 launcher 所追踪的 import/path/decode process group 与 `torchrun`，然后才恢复原始保活 launcher；恢复最多等待 30 秒并验证 `main.py` 进程。
 4. 若无法确认训练已停，脚本会故意保持保活暂停，避免两个任务争抢 GPU，并在终端打印 CRITICAL 信息。
 
 配置了 keep-alive 管理时，无论成功或失败，脚本末尾都会打印下面的人工恢复命令。它是自动恢复验证失败、且确认训练已经停止和 `main.py` 不存在时的兜底；未配置 keep-alive 时，脚本只会明确说明没有可用的恢复命令：
@@ -196,7 +242,7 @@ full 完成的最低验收条件是：脚本零退出、`training/training_compl
 bash <KEEPALIVE_LAUNCHER>
 ```
 
-## 7. 预期产物与仍需观察的项目
+## 8. 预期产物与仍需观察的项目
 
 每个 run root 会保留，不会覆盖旧证据：
 
@@ -206,17 +252,26 @@ bash <KEEPALIVE_LAUNCHER>
 ├── training.log                 # torchrun 标准输出
 ├── launch_config.txt            # 实际启动参数
 ├── source_provenance.txt         # HEAD、dirty 状态/差异 hash、关键源码 hash、运行时版本
+├── nccl/nccl_env.txt             # 启用 diagnostics 时的有效 NCCL/PyTorch 环境
 ├── gpu_metrics.jsonl            # 每卡显存、util、温度、功耗的时序采样
 ├── resource_monitor.log
 ├── training_summary.md/json     # duration、每卡峰值/均值
 ├── Video-R1-260k-video-path-verified.json
 ├── Video-R1-260k-video-path-verified.manifest.json
+├── Video-R1-260k-video-decoder-verified.json             # 默认正式 full
+├── Video-R1-260k-video-decoder-verified.json.manifest.json
+├── Video-R1-260k-video-decoder-verified.json.rejections.json
+├── decoder_manifest_validation.values # manifest reuse/绑定检查的机器可读结果
+├── torchrun-logs/                # 四个 rank 的 stdout/stderr
+├── training_failed.json          # 失败时的机器可读 marker；成功时不存在
+├── preflight_complete.json        # 仅 PREFLIGHT_ONLY=1，明确 torchrun 未启动
 └── training/
     ├── training_complete.json
     ├── checkpoint-*/            # 按 save_steps 产生
+    ├── rank_trace_rank*.jsonl   # 仅 RANK_PHASE_TRACE=1 时产生
     └── selected_tokens_rank*.jsonl  # 仅 bounded debug 明确开启时写入
 ```
 
-full 默认关闭逐 token JSONL，避免 116,248 条视频训练产生无界的证据文件；smoke 已经提供了三类 CoT token 的可读样例。若确实要检查 full 中的 token，需要先把 `MAX_STEPS` 设成有限值，再明确设 `FULL_OUTPUT_SELECTED_TOKEN=1`。path-verified 只表示路径存在且非空；若 full 因 codec/坏视频失败，保留失败 evidence 后新增有界 decode preflight，不得把原 manifest 描述为 decode-verified。
+full 默认关闭逐 token JSONL，避免 116,248 条视频训练产生无界的证据文件；smoke 已经提供了三类 CoT token 的可读样例。若确实要检查 full 中的 token，需要先把 `MAX_STEPS` 设成有限值，再明确设 `FULL_OUTPUT_SELECTED_TOKEN=1`。path-verified 只表示路径存在且非空；decoder-verified 表示本次配置下 Qwen/torchvision preprocessing 已通过。若有 rejection，必须使用 manifest/rejections SHA 追踪最终训练语料，不得把它描述为原始全量数据的严格复现。
 
-还未完成的是修复后 full epoch 的实际耗时、长程稳定性、checkpoint 恢复、paired baseline/KTR 对比和最终任务指标；这些必须以后续真实 run 的落盘数据为准。当前 active full 在修复前 dirty source 启动，缺少启动时自动 provenance，因此仅作探索性长跑/资源观察，不为本次提交而中断。若 full 因容量门禁、视频解码或训练错误退出，保留其 artifact、先核查 `terminal.log`/`training.log`/`training_summary.md`，而不是直接切到 B200 或改变算法配置。
+还未完成的是修复后 checkpoint-500 诊断恢复、正式 full epoch 的实际耗时、长程稳定性、paired baseline/KTR 对比和最终任务指标；这些必须以后续真实 run 的落盘数据为准。旧 active full 已失败结束，缺少启动时自动 provenance，仅保留为故障/资源观察证据。若新 full 因容量门禁、视频解码或训练错误退出，保留 `terminal.log`/`training.log`/`torchrun-logs`/`rank_trace`/`nccl`/`training_summary.md`，再分析，而不是直接切到 B200 或改变算法配置。

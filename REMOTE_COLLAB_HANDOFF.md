@@ -86,7 +86,7 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 | --- | --- | --- | --- |
 | 集群 1 | CPU / 联网准备端 | 有外网；与集群 2 共享持久卷 | 下载依赖、查询官方元数据、准备 wheel；不承担 GPU 训练 |
 | 集群 2 | 训练端 | 4×H200（约 143,771 MiB/卡）、Python 3.12、PyTorch 2.10 + CUDA 12.8 | 假定离线；模型、数据、overlay 从 `<共享持久卷>` 读取；full KTR 在这里运行 |
-| 集群 3 | 候选扩容端 | 8×B 系列 GPU 候选 | 本轮未完成模型、数据、overlay、CUDA/attention 兼容性验证；不能自动切换过去 |
+| 集群 3 | 候选扩容端 | 8×B 系列 GPU 候选；已准备独立的 `setup_b200_env.sh` 与 `somke-b200.sh` | 脚本仅完成静态检查，尚未完成模型、数据、overlay、CUDA/FlashAttention2 的真实节点验证；不能自动切换过去 |
 | `<共享持久卷>` | CPU/GPU 共享资产 | 项目源码、模型、Video-R1 数据、wheel/overlay、运行 artifact | 只存非机密运行资产；不要存私钥、token 或认证文件 |
 
 ### 已锁定的软件与资产
@@ -98,7 +98,7 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 | Transformers | `4.49.0.dev0` | 与 checkpoint 所需 Qwen2.5-VL 路径兼容 |
 | tokenizers / TRL / DeepSpeed | `0.21.4` / `0.16.0` / `0.15.4` | project-local overlay，避免污染系统环境 |
 | 离线安装资产 | GRPO runtime wheelhouse + checkpoint-compatible wheelhouse | 两者都不随 Git 提交；当前 bundle 对基础镜像仍有显式依赖，不能把它称为 clean-Python 完整闭包 |
-| 数据源 | Video-R1 标注共 263,071 条；路径存在且非空的 video 为 116,248 条 | full run 只使用 path-verified video；这不是全量解码成功证明 |
+| 数据源 | Video-R1 标注共 263,071 条；路径存在且非空的 video 为 116,248 条 | full 默认先做 path verification，再以训练同一 Qwen/torchvision 视频预处理做隔离 decode verification；是否有过滤必须以本次 manifest 为准 |
 | 分布式 | 4 rank、ZeRO-3、BF16、gradient checkpointing | 当前集群 2 已验证 profile |
 
 ### 离线环境重建前置条件
@@ -116,7 +116,7 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 
 ### 最小可执行阶梯（新 run；不触碰当前 active run）
 
-以下命令只使用占位符。先在集群 2 完成环境 gate 和修复后的 paired smoke，才允许启动新的 full；当前探索性 full 不得被这些命令替换或重启。
+以下命令只使用占位符，且每次 `RUN_ROOT` 都必须是尚不存在的新目录。旧探索性 full 已失败结束；先跑 checkpoint-500 诊断，再由其结果决定是否启动新的 full。
 
 ```bash
 cd <REPO_ROOT>
@@ -129,7 +129,18 @@ export DATA_ROOT=<DATA_ROOT>
 VARIANT=both ./smoke.sh
 
 # 仅在修复后 paired smoke 通过后；没有外部保活时不要设置 ALLOW_*。
-VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> ./run_full.sh
+# 仅定位/回归：保留旧 manifest 顺序，跨越旧故障点；不要将其当作正式结果。
+VARIANT=ktr \
+RUN_ROOT=<ARTIFACT_ROOT>/ktr-checkpoint500-diag-<UTC> \
+PREPARED_DATASET=<OLD_RUN>/Video-R1-260k-video-verified.json \
+USE_EXISTING_PREPARED_DATASET=1 \
+RESUME_FROM_CHECKPOINT=<OLD_RUN>/training/checkpoint-500 \
+VERIFY_VIDEO_DECODE=0 MAX_STEPS=540 SKIP_FINAL_MODEL_SAVE=true \
+NCCL_DIAGNOSTICS=1 RANK_PHASE_TRACE=1 \
+./run_full.sh
+
+# 诊断通过后，正式 full 从 step 0 开始；默认 decode verification 会持续报告 ETA。
+VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-decoder-verified-<UTC> ./run_full.sh
 ```
 
 若节点确有外部保活，额外显式配置其两个身份并取得暂停授权后才运行对应命令：
@@ -162,8 +173,9 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | GRPO entrypoint | `src/r1-v/src/open_r1/grpo.py` | 参数校验、direct/vLLM 路径选择、训练完成元数据 |
 | 依赖安装 | `setup_grpo_env.sh` | 建立 project-local Python overlay，并做 import gate |
 | 单步 smoke | `smoke.sh` | baseline/KTR 真正的 generate→forward→backward→optimizer；持续 heartbeat 和遥测 |
-| full launcher | `run_full.sh` | 全量 path-verified video、容量门禁、数据过滤、监控、checkpoint、退出清理、保活恢复与源码快照 |
+| full launcher | `run_full.sh` | 新 run-root 门禁、path/decode verification、容量门禁、rank 日志/NCCL 诊断、监控、checkpoint、退出清理、保活恢复与源码快照 |
 | 数据准备 | `src/grpo_prepare_dataset.py` | 绝对路径安全校验、路径存在/非空筛选、manifest 与进度输出；不做全量解码 |
+| 解码验证 | `src/grpo_verify_video_decode.py` | 在可杀死的 CPU 子进程中执行与训练相同的 Qwen 视频预处理；硬超时、完整 rejection manifest、30 秒进度/ETA |
 | 资源遥测 | `src/grpo_resource_monitor.py`、`src/grpo_run_summary.py` | GPU 显存/利用率/温度/功耗 JSONL，运行时长与峰值摘要 |
 | 证据与对比 | `src/grpo_token_report.py`、`src/grpo_compare_runs.py` | E/V/T CoT 样例、baseline 与 KTR 时长/资源对照 |
 
@@ -171,7 +183,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 | 原始高层要求 | 当前实现 | 状态 | 证据 |
 | --- | --- | --- | --- |
-| 视频/问题输入 | full run 过滤为路径存在且非空的 video | 已实现；未覆盖 image full run 或全量解码预检 | 过滤 manifest |
+| 视频/问题输入 | full 默认过滤为路径存在且非空的 video，再做 Qwen/torchvision decode verification | 已实现；若有 rejection，则是数据质量过滤后的降级复现，不是原始全量语料的严格复现 | 两层 manifest、rejections JSON、dataset SHA-256 |
 | 每 prompt 生成 8 个回答 | 当前 `G=4` | 未严格对齐 | 见第 6 节妥协 |
 | 正确性与格式奖励 | accuracy + format reward | 已对齐 | trainer metrics |
 | 同一 completion 三类归因 | 原始、视觉屏蔽、多个帧置换复用 completion | 已对齐 | KTR trainer / smoke |
@@ -224,6 +236,29 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 结论：该修复前 KTR-only 单步证据表明集群 2 的 4×H200 曾可启动相同容量量级；它不等价证明修复后 profile 的行为、完整 epoch 的长期稳定性或最终指标。修复后 full 前应先完成新的 paired smoke。
 
+### 已结束的探索性 full 故障（待回归验证）
+
+旧探索性 KTR run 已结束，不能再视为 active run。其 checkpoint-500 有完整的 4-rank ZeRO-3 model/optimizer shard，可用于**仅定位用**的短恢复；它不是修复后正式实验的结果。
+
+| 观测 | 已验证证据 | 结论边界 |
+| --- | --- | --- |
+| 终止位置 | 在 `global_step=529` 附近失败；checkpoint-500 可机械读取 | 只说明前 500 step 已保存，不代表后续稳定 |
+| NCCL 表现 | rank 1/2/3 在下一次 `_ALLGATHER_BASE` 等待约 30 分钟；rank 0 的最后 enqueue/complete 均停在前一序号 | 这是 rank 间 collective 顺序失步的证据，不单独证明根因 |
+| GPU 形态 | 等待期间 rank 0 长时间近 0% 利用率，其他 rank 接近满载 | 最高置信推断：rank 0 在下一 collective 前的本地工作停住 |
+| 显存 | 最大观测约 115.7 GiB，小于单卡约 143.8 GiB | 不是 OOM 证据 |
+| 最可能本地阶段 | `qwen-vl-utils` 的 torchvision whole-file 视频 decode 在 generation 前执行；旧 manifest 只验证路径/非空 | **推断而非已证明的单一根因**；新代码以相同 Qwen 预处理做隔离验证并留下 rank trace |
+
+为此新增的保护不是把问题归因于一个未验证的 NCCL 开关：
+
+1. full 默认在 CPU-only、可终止子进程中跑训练同一 Qwen/torchvision decode、采样和 resize；可恢复的媒体错误/超时写入有序 rejections JSON，意外 worker crash 则 fail-fast。即使 0 条通过也会保留 failed manifest/rejections。若有过滤，run 必须标为数据质量过滤后的降级复现。
+2. KTR trainer 在 decode/generate/policy/visual/temporal/ref/metrics 边界可选写入每 rank JSONL；短恢复设置 `RANK_PHASE_TRACE=1` 后，最后一条事件可定位卡住的样本/阶段。
+3. 多 rank generation 显式传递 `synced_gpus=True`，并显式传递 ZeRO-3 generation gather 配置。该项是稳健性/可观测性保护，不能修复 generation 之前的 decode stall。
+4. launcher 默认启用 PyTorch NCCL trace/dump 诊断、10 分钟 DDP timeout、`torchrun --tee` 分 rank 日志，并在失败时写 `training_failed.json`；watchdog dump 应从 `training.log`/`torchrun-logs` 读取，不能假定存在 `fr_trace.py` 所需的磁盘 trace 文件。
+5. checkpoint 恢复强制使用**新** run root、旧 path-verified JSON，并强制关闭 decoder filtering。历史数据全为 video，当前 trainer 对 homogeneous 数据委托父类 `RandomSampler`，保留旧 checkpoint 的 sampler contract。
+6. 所有可能长时间运行的预检（import/path/decode）均为 launcher 所追踪的独立 process group；`TERM` 会先停它们再恢复已授权保活。`PREFLIGHT_ONLY=1` 可完整验证这些阶段且明确不启动 `torchrun`。
+
+非训练验证已通过：4 条真实视频的 tracked `PREFLIGHT_ONLY=1` 为 4/4，明确写入 `torchrun_started=false` 且结束后无 worker/GPU 残留；16 worker、32 条真实视频抽样为 32/32，无 timeout。该抽样只验证实现和隔离机制，不能外推为 116,248 条全量数据的耗时或零 rejection。
+
 ## 5. 已踩坑、已验证修复与优化
 
 | 类别 | 现象 / 风险 | 已验证处理 | 结果 |
@@ -238,12 +273,13 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | T 归因稳定性 | 单次随机乱序方差大 | 使用 5 个非恒等置换，包含 reverse，取平均绝对 delta | T mask 稳定且非空 |
 | token 筛选 | 原代码跨 batch quantile、signed delta 且可能保留 ties | `paper/per_completion` 精确 top-20%、absolute delta | 每条 completion 的选中数量可审计 |
 | 数据路径 | 标注不保证媒体文件存在 | 训练前筛选路径存在且非空的 video，写 manifest | 避免路径缺失；不等于视频可解码 |
-| 全量媒体健康度 | path-verified 并不验证 codec 或实际帧解码 | trainer 在每个样本实际解码时 fail-fast；坏媒体须保留 run evidence 后单独做 decode preflight | 不把 116,248 条称为 decode-verified |
+| 全量媒体健康度 | path-verified 并不验证 codec、抽帧或 resize，且单 rank decoder stall 会拖住 ZeRO collective | `run_full.sh` 默认调用可杀死子进程的 Qwen decode preflight，训练端固定同一 torchvision backend；manifest 绑定 source SHA、video root、decoder/backend/nframes/max-pixels | 有 rejection 时必须保留 manifest/rejections，并标为数据质量过滤后的降级复现；worker crash 不静默过滤 |
 | length-control 对齐 | 旧 direct KTR 用 union 长度判定长度奖励，KTR/baseline reward 不对等 | 改用真实 `valid_mask` completion 长度；历史 comparison 仅保留为操作/容量证据 | 后续比较必须重跑两变体 |
 | 入口可移植性 | helper 位于仓库根会使标准 `src/r1-v` launcher 导入失败 | helper 放入 `open_r1` package；仅有 `--data_root` 的 baseline 与 KTR 共用 direct trainer，无该参数 baseline 保持原 trainer | 不能把直接路径默认强加给普通上游 baseline |
 | 可观测性 | 原训练不完整记录时长/显存/token 示例 | heartbeat、JSONL 遥测、summary、comparison、bounded token report | 可远程复查 |
-| 外部保活 | 保活占满 GPU 会污染资源数据；粗暴停止有风险 | 精确 PID + start-ticks 校验，需显式授权；退出时原 launcher 恢复 | smoke 已验证暂停/恢复 |
-| 中断安全 | 仅终止 shell 可能让 torchrun 继续、保活提前恢复 | launcher 跟踪 torchrun PID；清理时先 TERM/wait，再恢复保活 | 降低 GPU 冲突风险 |
+| rank 失步定位 | 旧日志无法定位 rank 0 停在 decode、generation 还是 teacher forcing | 可选 rank-phase JSONL、NCCL trace/dump、torchrun per-rank logs 和失败 marker | 短恢复先跨过旧故障步，再决定正式 full |
+| 外部保活 | 保活占满 GPU 会污染资源数据；粗暴停止有风险 | 精确 PID + start-ticks 校验，需显式授权；在空闲显存 gate 前暂停、退出时原 launcher 恢复 | 不会因保活占卡而提前误判显存不足 |
+| 中断安全 | 仅终止 shell 可能让 torchrun/decoder worker 继续、保活提前恢复 | launcher 跟踪 torchrun 与 import/path/decode process group；清理时先 TERM/wait，再恢复保活 | 降低 GPU 冲突风险 |
 | 环境交接 | wheelhouse/overlay 被 `.gitignore` 排除，clone 后并不天然可运行 | `setup_grpo_env.sh` 明确检查两个 wheelhouse，支持 `GRPO_WHEELHOUSE` 与 `COMPAT_WHEELHOUSE` 覆盖 | 避免同事误以为源码仓库包含全部离线依赖 |
 
 ## 6. 妥协、降级路径与不可自动化的选择
@@ -253,7 +289,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | 项目 | 上游 KTR launcher | 当前 full profile | 状态 / 原因 |
 | --- | ---: | ---: | --- |
 | rank 数 | 8 | 4 | 当前可用训练端只有 4×H200；全局 batch 随之从 8 变为 4 |
-| 数据 | Holmes-16k | 116,248 条 path-verified full video | 当前更大规模，不能作为同一数据分布的严格数值复现，也不代表全量 decode 已通过 |
+| 数据 | Holmes-16k | 116,248 条 path-verified video，经本次 decoder manifest 决定最终训练集 | 当前更大规模，不能作为同一数据分布的严格数值复现；若 decoder 有 rejection，另有数据质量过滤偏差 |
 | prompt 上限 | 16,384 | 4,096 | 为当前容量与吞吐做的保守配置 |
 | completion 上限 | 768 | 512 | 为当前容量与吞吐做的保守配置 |
 | GRPO generation 数 `G` | 8 | 4 | 未满足原始高层描述的“8 个回答” |
@@ -270,7 +306,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | 预检显存不足 | 退出，不启动训练；先保留日志和 GPU 快照 | 无训练结果；需另行做容量决策 | 静默抢占或停掉外部任务 |
 | FA2 dtype 错误 | 切换到 SDPA（当前已采用） | 速度下降、数值实现不完全相同 | 伪装为 FA2 成功 |
 | 接近 OOM | 先用 `MAX_STEPS` 的短 run；再评估降低 completion、时序 probe 或像素 | 改变协议，必须建新 run root 并标记为非严格对齐 | 覆盖原 run 或混合日志 |
-| 数据解码失败 | 保留失败样本与日志；在集群 1/2 增加有界 decode preflight 后重新写 manifest | 新 manifest 是新数据契约，不能与旧 run 混合 | 把 path-verified 宣称为 decode-verified |
+| 数据解码失败 | 保留失败样本与日志；使用 `grpo_verify_video_decode.py` 的有界 Qwen preflight 重写 manifest | 新 manifest 是新数据契约，不能与旧 run 混合；checkpoint resume 必须继续使用旧原始 manifest | 把 path-verified 或 filtered manifest 宣称为原始全量 decode-verified |
 | 速度不可接受 | 先测每 step、数据解码、保存开销；必要时降低 T probe 或使用更大已验证集群 | 结果与当前 full 不可直接混合 | 未经验证直接切集群 3 |
 | 模型/数据/overlay 缺失 | 在集群 1 获取并经共享卷交付；集群 2 做离线 import/model gate | 延迟启动 | 在 GPU 端反复联网安装 |
 | 需要严格上游 8-rank/FA2/G8 | 单独准备新 profile，先做环境、显存和一 step smoke | 不是当前 full run 的恢复参数 | 修改正在跑的 run |
@@ -288,7 +324,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 5. 若训练结束，检查 training_complete.json、training_summary.md/json、gpu_metrics.jsonl 和 checkpoint。
 ```
 
-当前 full 是在本分支的 provenance/length-control 修复前启动的 dirty-source 探索性 KTR 长跑：它没有启动时自动写入 `source_provenance.txt`，且不能与修复后的 baseline 混作结论性对比。它不应被为了代码提交而中断；其价值限于长程运行、资源和故障观察。运行时长、step、ETA 只以当前日志为准，不把易过期的数值写入 Git 文档。后续 launcher 会在训练前写入 `source_provenance.txt`（HEAD、dirty 状态/差异 hash、关键源码 SHA-256、运行时版本）。
+截至本次交接，旧探索性 full 已失败结束，4 张 GPU 没有本项目训练进程；不要对旧 run 重启、覆盖或在其目录内写入新文件。它没有启动时自动写入 `source_provenance.txt`，且不能与修复后的 baseline 混作结论性对比。下一次操作应是新的 checkpoint-500 诊断 run：它只跨越旧故障点以验证修复/采集 rank 证据，终端应确认 homogeneous 数据使用父类 `RandomSampler`；诊断通过后才启动从 step 0 开始的 decoder-verified full。后续 launcher 会在训练前写入 `source_provenance.txt`（HEAD、dirty 状态/差异 hash、关键源码 SHA-256、运行时版本）。
 
 ## 8. 推送前最终核对表
 
@@ -307,5 +343,5 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 1. 模型的 4 个 weight shards 已与官方 LFS SHA-256 元数据逐一匹配；config/index/processor manifest 未在本轮独立核对，因此不能据此排除全部模型相关偏差。
 2. 当前实现已真实验证 E/V/T 选择、union policy+KL、optimizer 更新、资源遥测与 CoT token 证据；修复后需重跑 paired smoke 才能给出公平的 baseline/KTR 数值比较。
-3. 当前 active full 是修复前探索性 direct KTR 长跑；后续 run 才会有源码 provenance，且它**不是**上游 8-rank、G=8、16k/768、401k pixels、FlashAttention2 launcher 的严格逐参数复现。
-4. 要求严格上游对齐时，必须单独做 8-rank/FA2/G8 profile 的容量和兼容性 smoke；不得篡改或重启当前 run。
+3. 旧探索性 full 已在约 step 529 因 rank 间 collective timeout 失败；最高置信推断是 rank 0 的训练前视频预处理 stall，而不是 OOM。新增 decoder isolation、rank trace 和 NCCL flight recorder 后，仍须由新的 checkpoint-500 短恢复实际回归验证。
+4. 后续正式 full 会有源码/数据 manifest provenance，且它**不是**上游 8-rank、G=8、16k/768、401k pixels、FlashAttention2 launcher 的严格逐参数复现。要求严格上游对齐时，必须另做 8-rank/FA2/G8 profile 的容量和兼容性 smoke。
