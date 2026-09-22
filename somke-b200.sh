@@ -165,6 +165,12 @@ if nvidia-smi --query-gpu=name --format=csv,noheader | grep -Fv 'B200' >/dev/nul
     exit 2
 fi
 
+# Do this before the Python gate rather than only before the delegated
+# launcher.  A stale scheduler/user mask could otherwise make
+# torch.cuda.device_count() report a subset even though this dedicated B200
+# node exposes all eight physical cards.
+export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+
 site_dir="$("${python_bin}" - <<'PY'
 import sysconfig
 print(sysconfig.get_paths()["purelib"])
@@ -173,7 +179,10 @@ PY
 require_path "venv site-packages" "${site_dir}"
 
 export PYTHONNOUSERSITE=1
-export PYTHONPATH="${project_root}/src:${project_root}/src/r1-v/src/open_r1:${project_root}/src/r1-v/src:${project_root}/src/qwen-vl-utils/src${PYTHONPATH:+:${PYTHONPATH}}"
+# Python consults PYTHONPATH before site-packages.  Put the pinned venv first
+# and discard any inherited control-plane paths so phase 2 cannot validate a
+# platform Transformers build that differs from the runtime we launch.
+export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/open_r1:${project_root}/src/r1-v/src:${project_root}/src/qwen-vl-utils/src"
 export MODEL_PATH="${model_path}"
 log "phase 2/6: checking pinned imports, FlashAttention-2 availability, and distinct Qwen media IDs"
 "${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
@@ -259,7 +268,6 @@ export DATA_ROOT="${data_root}"
 export DATASET_SOURCE="${dataset_source}"
 export OUTPUT_ROOT="${b200_root}/artifacts/grpo-smoke-b200"
 export RUN_ROOT="${run_root}"
-export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
 export NPROC_PER_NODE=8
 export REQUIRED_NPROC_PER_NODE=8
 export EXPECTED_GPU_NAME=B200

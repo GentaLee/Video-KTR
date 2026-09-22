@@ -86,6 +86,7 @@ esac
 compat_files=(
     tokenizers-0.21.4-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
     av-14.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+    huggingface_hub-0.34.4-py3-none-any.whl
     transformers-4.49.0.dev0-py3-none-any.whl
 )
 grpo_wheel_files=(
@@ -182,6 +183,34 @@ PY
 )"
 [[ -d "${venv_site}" ]] || die "venv site-packages directory is unavailable: ${venv_site}"
 
+# ``venv --system-site-packages`` follows the base interpreter (often
+# /usr/bin/python), not necessarily the CUDA-ready platform interpreter
+# selected above.  Add the selected platform's own site directories after the
+# venv site directory, so pinned venv packages override the image while the
+# CUDA-matched torch, torchvision, and FlashAttention-2 remain inherited.
+platform_prefix="$("${base_python}" - <<'PY'
+import sys
+print(sys.prefix)
+PY
+)"
+mapfile -t platform_sites < <("${base_python}" - <<'PY'
+from pathlib import Path
+import site
+import sys
+
+prefix = Path(sys.prefix).resolve()
+for raw_path in site.getsitepackages():
+    path = Path(raw_path).resolve()
+    try:
+        path.relative_to(prefix)
+    except ValueError:
+        continue
+    if path.is_dir():
+        print(path)
+PY
+)
+(( ${#platform_sites[@]} > 0 )) || die "B200 base Python has no usable site-packages directory below ${platform_prefix}"
+
 # The source checkout deliberately wins over an arbitrary PyPI qwen-vl-utils
 # release, while the pinned venv packages win over the B200 image's newer
 # Transformers stack.  The .pth is durable and applies to torchrun workers.
@@ -194,12 +223,21 @@ pth_tmp="${pth_file}.tmp.$$"
 } > "${pth_tmp}"
 mv -f "${pth_tmp}" "${pth_file}"
 
+platform_pth_file="${venv_site}/video_ktr_platform_runtime.pth"
+platform_pth_tmp="${platform_pth_file}.tmp.$$"
+printf '%s\n' "${platform_sites[@]}" > "${platform_pth_tmp}"
+mv -f "${platform_pth_tmp}" "${platform_pth_file}"
+
 mkdir -p "${b200_root}/.pip-cache" "${b200_root}/.pip-tmp" "$(dirname "${manifest_path}")"
 export PIP_CACHE_DIR="${b200_root}/.pip-cache"
 export TMPDIR="${b200_root}/.pip-tmp"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 export PIP_NO_INDEX=1
 export PYTHONNOUSERSITE=1
+# Avoid an ambient control-plane PYTHONPATH shadowing the pinned venv during
+# either package installation or the subsequent import gate.  The two durable
+# .pth files above provide the only required project/platform paths.
+export PYTHONPATH=""
 
 log "installing pinned checkpoint-compatible packages from the offline compatibility wheelhouse"
 compat_paths=()
@@ -220,12 +258,16 @@ DS_BUILD_OPS=0 "${venv_python}" -m pip install --no-index --no-deps --no-build-i
     "${grpo_wheelhouse}/deepspeed-0.15.4.tar.gz" \
     "${grpo_wheelhouse}/rouge_score-0.1.2.tar.gz"
 
+log "checking the resolved offline dependency graph"
+"${venv_python}" -m pip check
+
 export B200_ENV_MANIFEST_PATH="${manifest_path}"
 export B200_ENV_VENV_DIR="${venv_dir}"
 export B200_ENV_REPO_ROOT="${repo_root}"
 export B200_ENV_COMPAT_WHEELHOUSE="${compat_wheelhouse}"
 export B200_ENV_GRPO_WHEELHOUSE="${grpo_wheelhouse}"
 export B200_ENV_GPU_MODE="${gpu_mode}"
+export B200_ENV_PLATFORM_PREFIX="${platform_prefix}"
 
 log "running import, pinned-version, vendored-source, and FlashAttention-2 gates"
 "${venv_python}" - <<'PY'
@@ -245,6 +287,7 @@ import datasets
 import deepspeed
 import flash_attn
 import flash_attn_2_cuda
+import huggingface_hub
 import peft
 import tokenizers
 import torch
@@ -255,12 +298,13 @@ import qwen_vl_utils
 from transformers import Qwen2_5_VLForConditionalGeneration
 from trl import GRPOConfig, GRPOTrainer, ModelConfig, ScriptArguments, TrlParser, get_peft_config
 from open_r1.grpo import GRPOScriptArguments
-from trainer.video_ktr_grpo_trainer import VideoKTRGRPOTrainer
+from open_r1.trainer.video_ktr_grpo_trainer import VideoKTRGRPOTrainer
 
 venv_dir = Path(os.environ["B200_ENV_VENV_DIR"]).resolve()
 repo_root = Path(os.environ["B200_ENV_REPO_ROOT"]).resolve()
 gpu_mode = os.environ["B200_ENV_GPU_MODE"] == "1"
 manifest_path = Path(os.environ["B200_ENV_MANIFEST_PATH"])
+platform_prefix = Path(os.environ["B200_ENV_PLATFORM_PREFIX"]).resolve()
 
 expected = {
     "transformers": "4.49.0.dev0",
@@ -271,6 +315,7 @@ expected = {
     "datasets": "3.2.0",
     "accelerate": "1.3.0",
     "peft": "0.14.0",
+    "huggingface_hub": "0.34.4",
 }
 observed = {
     "transformers": transformers.__version__,
@@ -281,6 +326,7 @@ observed = {
     "datasets": datasets.__version__,
     "accelerate": accelerate.__version__,
     "peft": peft.__version__,
+    "huggingface_hub": huggingface_hub.__version__,
 }
 for name, version in expected.items():
     if observed[name] != version:
@@ -289,12 +335,14 @@ for name, version in expected.items():
 def starts_under(path, parent):
     return str(Path(path).resolve()).startswith(str(parent) + os.sep)
 
-for package, module in (("transformers", transformers), ("tokenizers", tokenizers), ("av", av)):
+for package, module in (("transformers", transformers), ("tokenizers", tokenizers), ("av", av), ("huggingface_hub", huggingface_hub)):
     if not starts_under(module.__file__, venv_dir):
         raise SystemExit(f"{package} did not resolve from isolated venv: {module.__file__}")
 for package, module in (("torch", torch), ("torchvision", torchvision), ("flash_attn", flash_attn)):
-    if starts_under(module.__file__, venv_dir):
-        raise SystemExit(f"{package} must remain supplied by the B200 image, not this venv: {module.__file__}")
+    if starts_under(module.__file__, venv_dir) or not starts_under(module.__file__, platform_prefix):
+        raise SystemExit(
+            f"{package} must resolve from the selected B200 platform runtime, not the venv: {module.__file__}"
+        )
 
 vendored_qwen = repo_root / "src" / "qwen-vl-utils" / "src"
 vendored_r1 = repo_root / "src" / "r1-v" / "src"
@@ -383,6 +431,7 @@ payload = {
     "repo_revision": git_revision,
     "python_executable": sys.executable,
     "venv": str(venv_dir),
+    "platform_prefix": str(platform_prefix),
     "versions": observed,
     "torch": {"version": torch.__version__, "cuda": torch.version.cuda, "file": torch.__file__},
     "torchvision": {"version": torchvision.__version__, "file": torchvision.__file__},
@@ -396,6 +445,7 @@ payload = {
         "transformers": transformers.__file__,
         "tokenizers": tokenizers.__file__,
         "av": av.__file__,
+        "huggingface_hub": huggingface_hub.__file__,
         "qwen_vl_utils": qwen_vl_utils.__file__,
     },
     "cuda": cuda,
