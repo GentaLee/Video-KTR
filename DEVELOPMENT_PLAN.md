@@ -12,7 +12,7 @@
 | 阶段 | 状态 | 可复查证据 / 下一步 |
 | --- | --- | --- |
 | B200 isolated venv / runtime bridge | 已验证 | pinned Transformers/TRL/DeepSpeed + B200 FA2 `sm_100` gate；CUDA headers、`ptxas` 和持久 Triton cache 已配置 |
-| 模型身份 | full 前必须通过 | 可信 exact-revision manifest 覆盖全部顶层常规模型文件，并由 runtime hash gate 复核；旧“4 个 weight shard 已比对”没有当前机器可审计证据，不能当作本机重哈希结论 |
+| 模型身份 | 已验证，full 前仍会复验 | 可信 exact-revision manifest 覆盖全部顶层常规模型文件；CPU-only runtime hash gate 已通过 19 文件/4 shard。旧“4 个 weight shard 已比对”仍不作为独立历史证据 |
 | B200 paired smoke | 已通过 | 8 条固定**视频**、8 ranks、prompt=16384、completion=768、G=8、FA2、8 帧；baseline 94.840 s，KTR 95.008 s；不是 mixed sampler 分布式覆盖 |
 | selector 语义 | 已通过 | E/V 每 completion 精确 top-20%；视频 T 同样精确 top-20%，image T 设计为全零；absolute delta、每 rank/step 单个非恒等置换、分离 image/video token ID |
 | Holmes path 数据 | 当前降级可用 | `15,365 / 16,916`（8765 image + 6600 video）；缺 1551 video，strict full 默认拒绝 |

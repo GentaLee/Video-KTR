@@ -9,7 +9,7 @@
 | 项目 | B200 实现 / 已验证值 | 对齐状态 |
 | --- | --- | --- |
 | GPU / ranks | 集群 3，8×B200，8 ranks | 对齐原始 8 卡 launcher |
-| 模型身份 | Qwen2.5-VL-7B-COT-SFT；以可信 exact-revision manifest 与 runtime hash gate 绑定 config、index、weight shard、tokenizer/processor 等全部顶层常规文件 | gate 为 full 的必需门禁；当前文档不把旧“4 shard 已匹配”当作本机独立重哈希证据 |
+| 模型身份 | Qwen2.5-VL-7B-COT-SFT；以可信 exact-revision manifest 与 runtime hash gate 绑定 config、index、weight shard、tokenizer/processor 等全部顶层常规文件 | CPU-only runtime gate 已实测通过：19 文件、4 shard；full 仍会在占卡前再次复验 |
 | 数据请求 | Holmes-16k | 严格性取决于媒体完整度，见“数据门禁” |
 | prompt / completion / G | 16,384 / 768 / 8 | 对齐原始 launcher |
 | attention | `flash_attention_2`；FA2 二进制含 `sm_100`，训练运行时强制解析为 FA2 | 已验证，不静默回退 |
@@ -20,7 +20,7 @@
 
 上游命令本身可见 [原始 launcher](https://github.com/zywang0104/Video-KTR/blob/main/src/scripts/run_grpo_video_ktr.sh)：8 ranks、16k prompt、768 completion、G=8、`max_pixels=401408` 与 FA2。当前实现新增的是可审计的数据/保活门禁、mixed-modality sampler、严格 attention gate 和选择器语义修正，不是把 H200 配置直接搬到 B200。
 
-full 的默认信任锚是随代码审阅、按精确 revision 固定的 [模型完整性 manifest](manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json)，而不是可变的本机输出。runtime gate 必须对本地 checkpoint 的全部顶层常规文件重新计算 SHA-256 并与该 JSON 对比，通过后才可进入 GPU 阶段，并应落盘 `runtime_gate.json`。`grpo_write_model_sha256_manifest.py` 生成的本地 verified-copy 仅可用于独立比较或恢复诊断，不能替代默认锚。这是已加入的 fail-closed 契约，**不是**“本轮已经重新哈希”的结论；实际本机 hash 证据以对应 run artifact 的 gate 输出为准。
+full 的默认信任锚是随代码审阅、按精确 revision 固定的 [模型完整性 manifest](manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json)，而不是可变的本机输出。runtime gate 必须对本地 checkpoint 的全部顶层常规文件重新计算 SHA-256 并与该 JSON 对比，通过后才可进入 GPU 阶段，并应落盘 `runtime_gate.json`。`grpo_write_model_sha256_manifest.py` 生成的本地 verified-copy 仅可用于独立比较或恢复诊断，不能替代默认锚。2026-09-22 的 CPU-only 实测已通过 19 文件、4 shard 校验，且未暂停保活、未启动 full；full 自身仍会在开始与占卡前各复验一次。
 
 ## 已通过的最终 smoke
 

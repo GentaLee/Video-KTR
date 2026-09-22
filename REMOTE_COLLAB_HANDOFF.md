@@ -94,7 +94,7 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 | 类别 | 已验证版本/身份 | 用途 |
 | --- | --- | --- |
 | 模型 | `Video-R1/Qwen2.5-VL-7B-COT-SFT`，Qwen2.5-VL，BF16，8.29B 参数 | policy 与 reference 的基座 checkpoint |
-| 模型身份（集群 3 target gate） | checked-in 的 exact-revision `manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json` 覆盖模型目录全部顶层常规文件（含 config、index、weight shard、tokenizer/processor），runtime gate 逐项重算 | full 必须 fail-closed；在 `runtime_gate.json` 实际落盘前，不宣称本机已独立重哈希。本地 verified-copy 只能用于独立比较/恢复，不能替代该锚；旧“4 shard 匹配”仅为无机器可读证据的历史说法 |
+| 模型身份（集群 3 target gate） | checked-in 的 exact-revision `manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json` 覆盖模型目录全部顶层常规文件（含 config、index、weight shard、tokenizer/processor），runtime gate 逐项重算 | CPU-only 实测已通过 19 文件/4 shard；full 必须继续 fail-closed 并在占卡前复验。本地 verified-copy 只能用于独立比较/恢复，不能替代该锚；旧“4 shard 匹配”仅为无机器可读证据的历史说法 |
 | Transformers | `4.49.0.dev0` | 与 checkpoint 所需 Qwen2.5-VL 路径兼容 |
 | tokenizers / TRL / DeepSpeed | `0.21.4` / `0.16.0` / `0.15.4` | project-local overlay，避免污染系统环境 |
 | 离线安装资产 | GRPO runtime wheelhouse + checkpoint-compatible wheelhouse | 两者都不随 Git 提交；当前 bundle 对基础镜像仍有显式依赖，不能把它称为 clean-Python 完整闭包 |
@@ -440,5 +440,29 @@ RUNNING: 无 B200 full training；保活应在运行；下次检查条件=操作
 RECOVERY: KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start（仅自动恢复失败且确认 torchrun/rank 已退出时）。
 FIRST_COMMAND: cd <REPO_ROOT> && git status --short
 NEXT: 操作者补齐媒体后复验 strict gate，或显式选择 reduced 路径手动启动单个变体；baseline/KTR 必须串行。
+ASK: NONE
+```
+
+```text
+[KT-HANDOFF/v1]
+ID: 20260922-AI-002
+TIME_UTC: 2026-09-22T05:44:00Z
+FROM / TO: AI / 远程协作者
+TYPE: VERIFICATION
+STATUS: PASSED
+STATE_CHANGE: 集群 3 已部署模型/环境完整性门禁，并完成一次 CPU-only 实测；full 仍未启动。
+SCOPE: 集群 3 checkpoint、隔离运行时与保活边界
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；commit=bd87d79；GPU task=none
+CLAIM: checked-in exact-revision manifest 与本地 checkpoint 的 19 个顶层常规文件、4 个 indexed weight shard 一致；Python/Torch/torchvision/PyAV/DeepSpeed 与环境 manifest 一致。
+EVIDENCE: runtime gate exit=0；files=19；shards=4；CUDA_VISIBLE_DEVICES 为空；训练 process=0；保活唯一实例=1。
+CHANGES: full 在长 CPU data preflight 前后均会运行 smoke/source 与 model/environment gate；未启动 torchrun。
+EXECUTED: CPU-only runtime gate；未执行 somke-b200.sh 或 run_full_b200.sh。
+ARTIFACTS: <共享持久卷>/video-ktr-b200/artifacts/b200-runtime-integrity-<UTC>/runtime_gate.json
+RISK / ROLLBACK: 当前数据仍为 15365/16916；strict full 仍须补齐媒体。若后续 gate 失败，不暂停保活、不启动训练，保留失败 artifact。
+LAST_VERIFIED: runtime gate exit=0；commit=bd87d79；worktree clean。
+RUNNING: 无 B200 training；保活运行且唯一；下次检查=操作者手动启动前。
+RECOVERY: 无需操作；仅自动恢复失败且确认 torchrun/rank 已退出时才使用 `KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start`。
+FIRST_COMMAND: cd <REPO_ROOT> && git status --short && git rev-parse --short HEAD
+NEXT: 补齐媒体走 strict，或显式选择 reduced 后手动串行运行 KTR / baseline。
 ASK: NONE
 ```
