@@ -7,7 +7,7 @@
 
 ## 0. 当前 B200 执行计划（active）
 
-集群 3 已完成 8×B200 paired smoke；baseline/KTR 各有一次真实 optimizer step，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测与保活恢复均为 PASS。full 尚未执行，且必须由操作者手动启动。
+集群 3 已完成 8×B200 paired smoke；baseline/KTR 各有一次真实 optimizer step，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测与保活恢复均为 PASS。尚无 B200 `torchrun` / GPU full epoch；历史 reduced wrapper 已在 CPU decoder data-class gate fail-closed，正式 full 仍必须由操作者手动启动。
 
 | 阶段 | 状态 | 可复查证据 / 下一步 |
 | --- | --- | --- |
@@ -15,17 +15,17 @@
 | 模型身份 | 已验证，full 前仍会复验 | 可信 exact-revision manifest 覆盖全部顶层常规模型文件；CPU-only runtime hash gate 已通过 19 文件/4 shard。旧“4 个 weight shard 已比对”仍不作为独立历史证据 |
 | B200 paired smoke | 已通过 | 8 条固定**视频**、8 ranks、prompt=16384、completion=768、G=8、FA2、8 帧；baseline 94.840 s，KTR 95.008 s；不是 mixed sampler 分布式覆盖 |
 | selector 语义 | 已通过 | E/V 每 completion 精确 top-20%；视频 T 同样精确 top-20%，image T 设计为全零；absolute delta、每 rank/step 单个非恒等置换、分离 image/video token ID |
-| Holmes path 数据 | 当前降级可用 | `15,365 / 16,916`（8765 image + 6600 video）；缺 1551 video，strict full 默认拒绝 |
-| mixed media decode | full 前门禁已实现 | CPU-only、spawned worker、硬超时、实时 ETA；decoder rejection 默认拒绝 |
+| Holmes path 数据 | strict path gate 已通过 | `16,916 / 16,916`（8765 image + 8151 video）；233 个训练视频已补齐 |
+| mixed media decode | strict standalone gate 已通过 | CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408`；`verified=16916`、`rejected=0`、`timed_out=0`，data-class=`strict-holmes-16k` |
 | B200 full KTR / baseline | 待操作者启动 | 使用 `run_full_b200.sh`；两个 variant 需串行运行并比较 artifact |
 
-严格 full（数据补齐后）只需显式授权保活生命周期；当前数据则还必须显式承认 reduced：
+独立 strict decoder/data-class gate 已通过；每次 strict full 仍会在占用 GPU 前重跑 gate。历史 reduced 路径仍只保留用于定位：
 
 ```bash
 # strict：仅当 16,916 条媒体均可用且 decode=0 rejection 时才会通过
 B200_ALLOW_PAUSE_KEEPALIVE=1 VARIANT=ktr ./run_full_b200.sh
 
-# 当前可运行，但输出会标为 reproduction_class=reduced-media-subset
+# 历史 reduced/诊断：输出会标为 reproduction_class=reduced-media-subset
 B200_ALLOW_PAUSE_KEEPALIVE=1 B200_ALLOW_REDUCED_HOLMES=1 \
   VARIANT=ktr ./run_full_b200.sh
 ```

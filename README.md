@@ -126,7 +126,9 @@ work: 16,384 prompt tokens, 768 completion tokens, `G=8`,
 FlashAttention-2, Holmes-16k, requested `max_pixels=401408`, and
 `nframes=8`. Its B200 paired smoke has passed, but it is an 8-record
 **video-only** smoke, not distributed mixed image/video sampler coverage; a
-full epoch has **not** been started by this repository workflow.
+GPU full epoch has **not** been started by this repository workflow; a
+historical reduced wrapper stopped at its CPU decoder data-class gate before
+`torchrun`.
 
 The B200 path uses `paper/per_completion`: E/V receive an exact top-20% mask
 per completion; T receives the same exact top-20% selection for video
@@ -145,9 +147,13 @@ records are present and mixed-media decoder verification has no rejection:
 B200_ALLOW_PAUSE_KEEPALIVE=1 VARIANT=ktr ./run_full_b200.sh
 ```
 
-The currently available `15,365 / 16,916` media subset requires an explicit
-opt-in and is labeled `reduced-media-subset`; it is not a strict full-data
-result:
+The historical `15,365 / 16,916` media subset required an explicit opt-in and
+is labeled `reduced-media-subset`; it is not a strict full-data result. The
+233 missing training-video paths have since been restored. A standalone
+canonical path, mixed-media decoder, and data-class gate passed with all
+`16,916` records and zero rejections/timeouts. Each full launch repeats that
+gate before GPU work; the following reduced command is historical
+diagnostic-only, not the current strict route:
 
 ```bash
 B200_ALLOW_PAUSE_KEEPALIVE=1 \

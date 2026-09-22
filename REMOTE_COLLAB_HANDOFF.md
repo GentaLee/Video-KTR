@@ -12,7 +12,7 @@
 ID: <UTC日期>-<发送方>-<序号>
 TIME_UTC: <ISO-8601>
 FROM / TO: <角色>
-TYPE: ACK | UPDATE | EXECUTION | DECISION | INCIDENT | REVIEW | HANDOFF
+TYPE: ACK | UPDATE | EXECUTION | DECISION | INCIDENT | REVIEW | VERIFICATION | HANDOFF
 STATUS: PLANNED | RUNNING | PASSED | FAILED | BLOCKED | NEEDS_DECISION
 STATE_CHANGE: <相对上一条消息的状态变化；无则写 NONE>
 SCOPE: <本消息仅覆盖的对象>
@@ -375,7 +375,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | --- | --- | --- |
 | 上游参数 | 8 ranks、prompt=16384、completion=768、G=8、FA2、1 epoch、save step=100 | `save_total_limit=2` 是持久存储折中，记录在 `launch_config.txt` |
 | mixed data | `grpo_prepare_dataset.py --data-type all` 后由 `grpo_verify_media_decode.py` 在 CUDA-hidden spawned CPU worker 解码 image/video，硬超时、rejections、吞吐/ETA | full 前预检可耗时；worker crash/0 条记录 fail-fast |
-| data strictness | `grpo_validate_b200_dataset.py` 固定核验 Holmes-16k 模态计数 | 当前只得到 15365/16916，默认拒绝而非静默训练 |
+| data strictness | `grpo_validate_b200_dataset.py` 固定核验 Holmes-16k 模态计数 | standalone strict path、mixed decoder 与 data-class gate 均已通过：16916/16916、0 rejection、0 timeout；每次 full 仍在 GPU 前重跑 gate |
 | smoke lineage | `grpo_validate_b200_smoke.py` 检查成功 marker、两个 completion、profile、clean Git、smoke ancestor 和关键训练源码 SHA | launcher/文档后续提交可存在；训练关键源码变化必须重跑 smoke |
 | 保活 | 外层 `run_full_b200.sh` 使用官方 controller；CPU preflight 时保活运行，只有 GPU preflight/torchrun 时暂停 | cleanup 先停本任务、确认 GPU 空闲，再恢复且确保唯一实例；不使用 `pkill` |
 | 可观测性 | terminal.log、GPU JSONL、heartbeat、torchrun logs、source/data/smoke provenance | full 必须实际结束才可声称 `training_complete.json`/summary 成功 |
@@ -384,7 +384,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 ### 数据门禁与手动命令
 
-当前数据状态：16,916 条 source（8,765 image + 8,151 video）；路径可用 15,365 条（8,765 image + 6,600 video），缺失 1,551 video/233 个唯一媒体路径。
+当前数据状态：16,916 条 source（8,765 image + 8,151 video）；233 个缺失训练视频已补齐。standalone strict mixed decoder 在 CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408` 下完成 `verified=16916`、`rejected=0`、`timed_out=0`，data-class gate 结果为 `strict_holmes_16k=true`、`reproduction_class=strict-holmes-16k`。历史 15,365 条 run 保留 reduced 标签。
 
 ### 补齐 strict Holmes-16k 的匿名步骤
 
@@ -401,7 +401,7 @@ B200_ALLOW_PAUSE_KEEPALIVE=1 \
   RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-<UTC> \
   ./run_full_b200.sh
 
-# 当前可执行 reduced：明确写入 reproduction_class=reduced-media-subset
+# 历史 / 诊断 reduced：明确写入 reproduction_class=reduced-media-subset；不是当前 strict 路径
 B200_ALLOW_PAUSE_KEEPALIVE=1 \
   B200_ALLOW_REDUCED_HOLMES=1 \
   VARIANT=ktr \
@@ -415,7 +415,7 @@ B200_ALLOW_PAUSE_KEEPALIVE=1 \
 KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start
 ```
 
-当前 `RUNNING` 状态：无本项目 B200 full training；保活应为运行状态。下一位执行者先按第 0 节模板做只读确认，再决定是否以 strict 或显式 reduced 路径手动启动。
+当前 `RUNNING` 状态：历史 reduced KTR wrapper 已在 CPU-only decoder data-class gate fail-closed（2 条记录、同一物理视频的 timeout），未启动 `torchrun`；standalone strict 16,916 条 decoder/data-class gate 已通过。已验证外部保活主进程为唯一实例；尚无本项目 B200 `torchrun` / GPU full epoch。每次正式 full 仍会在 GPU 前重跑 gate，并仅由官方 controller 暂停/恢复保活。
 
 ### 最新 active 状态记录（可直接续写）
 
@@ -464,5 +464,77 @@ RUNNING: 无 B200 training；保活运行且唯一；下次检查=操作者手�
 RECOVERY: 无需操作；仅自动恢复失败且确认 torchrun/rank 已退出时才使用 `KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start`。
 FIRST_COMMAND: cd <REPO_ROOT> && git status --short && git rev-parse --short HEAD
 NEXT: 补齐媒体走 strict，或显式选择 reduced 后手动串行运行 KTR / baseline。
+ASK: NONE
+```
+
+```text
+[KT-HANDOFF/v1]
+ID: 20260922-AI-003
+TIME_UTC: 2026-09-22T06:36:36Z
+FROM / TO: AI / 远程协作者
+TYPE: UPDATE
+STATUS: RUNNING
+STATE_CHANGE: 集群 3 已补齐 Holmes-16k 的 233 个缺失训练视频；strict path gate 已通过，strict decoder gate 待当前历史 reduced run 退出后执行。
+SCOPE: 集群 3 Holmes-16k 媒体补齐、strict path 契约与正式 paired full 前置条件
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；commit=ec02889；run=<共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>
+CLAIM: 16,916 条的路径完整性已验证，但尚无全量 mixed decoder `rejected=0` 证据，不能启动或宣称 strict full。
+EVIDENCE: transfer=233/233 non-empty、bytes=1892102611；path gate exit=0、class=strict-holmes-16k、available=16916/16916（8765 image、8151 video）。
+CHANGES: 更新 B200 数据状态、strict 启动前置条件和本交接记录；未提交媒体、模型、artifact 或凭据。
+EXECUTED: 传输 233 个已核对文件名的训练视频；在 CUDA-hidden 条件下执行 path verification 与 strict path data-class gate；未启动 strict KTR 或 baseline。
+ARTIFACTS: <共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>/Holmes-16k-path-verified.json(.manifest.json)；data_path_gate.json；path_prepare.log；path_gate.log。
+RISK / ROLLBACK: 当前 historical reduced run 的 manifest 已冻结为 15365 条，保留其 reduced 结论；全量 decoder 任一 rejection 都会阻止 strict 声明。KTR 与 baseline 不可并发。
+LAST_VERIFIED: strict path gate exit=0；strict_holmes_16k=true；missing_records=0；外部保活未被本次 CPU-only 检查暂停。
+RUNNING: historical reduced KTR 的 CPU-only decoder preflight；最近进度以该 run 的 terminal.log 为准；当前已出现 timeout，预期将 fail-closed，训练未开始。
+RECOVERY: KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start（仅自动恢复失败且已确认全部 torchrun/rank 退出时）。
+FIRST_COMMAND: tail -n 40 <共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-reduced-<UTC>/terminal.log
+NEXT: AI 在 historical reduced run 退出后执行一次完整 strict mixed decode；仅 `verified=16916,rejected=0,timed_out=0` 时由操作者手动按 KTR→baseline 串行启动。
+ASK: NONE
+```
+
+```text
+[KT-HANDOFF/v1]
+ID: 20260922-AI-004
+TIME_UTC: 2026-09-22T07:25:41Z
+FROM / TO: AI / 远程协作者
+TYPE: UPDATE
+STATUS: RUNNING
+STATE_CHANGE: historical reduced wrapper 已在 decoder data-class gate fail-closed；当前已启动新的 strict 16,916 条 canonical decoder gate，尚未启动 GPU 训练。
+SCOPE: 集群 3 strict mixed-media decoder、历史 reduced failure 证据与正式 full 前置条件
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；commit=ec02889；run=<共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>
+CLAIM: 当前 strict decoder 已处理 2500/16916 且零 rejection；完成后仍须由 data-class validator 生成 `data_gate.json` 并 exit=0，才可 strict-ready。
+EVIDENCE: historical wrapper exit=1、`torchrun`=0、decoder verified=15363/rejected=2/timed_out=2；strict decoder canonical 参数为 torchvision、nframes=8、CLI max_pixels=401408、workers=8、timeout=120，当前 2500/16916、rejected=0。
+CHANGES: 更新 B200/开发/README/说明/交接文档的实际运行状态；未改训练源码、媒体、模型、保活或凭据。
+EXECUTED: 对历史 timeout 的同一媒体做无竞争单 worker 诊断（120 秒失败、600 秒 112 秒通过）；启动 CUDA-hidden strict decoder；未启动 strict KTR 或 baseline。
+ARTIFACTS: <共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-reduced-<UTC>/Holmes-16k-media-decoder-verified.json(.manifest.json/.rejections.json)；<共享持久卷>/video-ktr-b200/artifacts/decoder-diagnosis-<UTC>/；<共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>/decoder_terminal.log。
+RISK / ROLLBACK: 历史 timeout 的媒体可在 112 秒单 worker 解码，但仍接近 120 秒 canonical 上限；strict full 只能以全量 canonical decoder `verified=16916,rejected=0,timed_out=0` 和随后的 data gate exit=0 为准。不得设 filtered opt-in；KTR 与 baseline 不可并发。
+LAST_VERIFIED: transfer=233/233 non-empty、strict path gate exit=0、available=16916/16916；历史 wrapper fail-closed 且保活未暂停。
+RUNNING: strict mixed decoder，CPU-only；2500/16916、rejected=0；下次检查=终态 decoder manifest 与 data gate。
+RECOVERY: NONE；当前非 GPU 训练，保活不得手工停止。仅自动恢复失败且确认全部 torchrun/rank 退出时才使用官方 launcher。
+FIRST_COMMAND: tail -n 40 <共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>/decoder_terminal.log
+NEXT: AI 等待 decoder 完成后运行 strict data-class validator；仅 gate exit=0 时由操作者依次手动启动 strict KTR、待其成功结束后再启动 strict baseline，并生成对比 artifact。
+ASK: NONE
+```
+
+```text
+[KT-HANDOFF/v1]
+ID: 20260922-AI-005
+TIME_UTC: 2026-09-22T08:27:03Z
+FROM / TO: AI / 远程协作者
+TYPE: UPDATE
+STATUS: PASSED
+STATE_CHANGE: 233 个缺失训练视频已补齐；standalone strict mixed decoder 与 strict data-class gate 均通过，正式 paired full 现在具备数据前置条件。
+SCOPE: 集群 3 Holmes-16k 媒体补齐、strict 数据 gate、KTR→baseline 手动启动前置条件
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；commit=ec02889（运行源码；本记录所在文档提交另见 Git log）；run=<共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>
+CLAIM: 完整 Holmes-16k 已通过 canonical CPU-only mixed decoder 与 data-class gate，类别为 strict-holmes-16k；尚未启动本项目 GPU full。
+EVIDENCE: transfer=233/233 non-empty、bytes=1892102611；path gate exit=0、available=16916/16916（8765 image、8151 video）；decoder exit=0、status=passed、verification_complete=true、verified=16916、rejected=0、timed_out=0；decoder=torchvision、CUDA-hidden、nframes=8、CLI max_pixels=401408；data-class gate exit=0、strict_holmes_16k=true、reproduction_class=strict-holmes-16k、decoder_filtered=false。
+CHANGES: 更新 B200/开发/README/说明/交接文档的 strict 终态、训练顺序和证据；未提交媒体、模型、artifact、保活配置或凭据。
+EXECUTED: 传输并路径核验 233 个训练视频；执行 CUDA-hidden standalone mixed decoder 和 strict data-class validator；未启动 KTR、baseline、torchrun 或 GPU full。
+ARTIFACTS: <共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>/Holmes-16k-path-verified.json(.manifest.json)；Holmes-16k-decoder-verified.json(.manifest.json/.rejections.json)；data_path_gate.json；data_gate.json；decoder_terminal.log；data_gate.log。
+RISK / ROLLBACK: full 每次仍会在 GPU 前重新执行 path/decode gate；任一新的 rejection/timeout 都会 fail-closed，不得设置 reduced/filter opt-in 来冒充 strict。历史 15365 条 reduced run 与其失败证据保持冻结。KTR 与 baseline 不可并发。
+LAST_VERIFIED: data-class gate exit=0；status=passed；class=strict-holmes-16k；完整模态计数=8765 image + 8151 video；外部保活主进程=1；本项目 torchrun=0。
+RUNNING: 外部保活为唯一已验证实例；无本项目 decoder、torchrun 或 GPU full。下次检查=操作者手动启动 KTR 后的 terminal.log/heartbeat。
+RECOVERY: 不需要手工停止保活；正式 full 仅使用官方 controller 管理暂停与恢复。仅自动恢复失败且确认全部 torchrun/rank 已退出时使用 `KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start`。
+FIRST_COMMAND: tail -n 40 <共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>/data_gate.log
+NEXT: 操作者先手动启动 strict KTR；仅在其 exit=0、`training_complete.json` 与保活恢复均通过后，再以独立新 run-root 启动 strict baseline；最后运行对比脚本并要求通过。
 ASK: NONE
 ```

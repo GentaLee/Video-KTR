@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。完整 epoch 的 full **尚未启动**，仅由操作者手动运行 [run_full_b200.sh](run_full_b200.sh)。
+集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。尚无 B200 `torchrun` / GPU full epoch；一个历史 reduced wrapper 已在 CPU decoder data-class gate fail-closed，正式 full 仍仅由操作者手动运行 [run_full_b200.sh](run_full_b200.sh)。
 
 | 项目 | B200 实现 / 已验证值 | 对齐状态 |
 | --- | --- | --- |
@@ -65,21 +65,21 @@ Qwen rotary 修复对应 [Transformers 上游修正](https://github.com/huggingf
 
 ## 数据门禁与降级路径
 
-当前路径核验结果为 `15,365 / 16,916`：图像 `8,765 / 8,765`，视频 `6,600 / 8,151`；缺失 `1,551` 条，均为视频（233 个唯一媒体路径）。
+已补齐并传输 233 个 Video-Holmes 训练视频路径；独立 strict gate 已确认 `16,916 / 16,916`：图像 `8,765 / 8,765`，视频 `8,151 / 8,151`。在 CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408` 的 canonical mixed decoder 中，`verified=16,916`、`rejected=0`、`timed_out=0`；data-class gate 结果为 `strict_holmes_16k=true`、`reproduction_class=strict-holmes-16k`。此前 `15,365` 条的 run 是冻结清单的历史 reduced run，不能因媒体后来补齐而重新标成 strict。
 
 | 路径 | 触发条件 | 产物标记 | 是否能称严格 Holmes-16k |
 | --- | --- | --- | --- |
 | strict | 16,916 条路径均在，mixed Qwen decode 0 rejection | `reproduction_class=strict-holmes-16k` | 可以 |
-| 当前 reduced | 显式 `B200_ALLOW_REDUCED_HOLMES=1`，且恰为当前 15,365 条契约 | `reproduction_class=reduced-media-subset` | 不可以 |
+| historical reduced | 显式 `B200_ALLOW_REDUCED_HOLMES=1`，且冻结为 15,365 条契约 | `reproduction_class=reduced-media-subset` | 不可以 |
 | decoder filtered | decode 有 rejection，另需显式 `B200_ALLOW_DECODER_FILTERED=1` | 仍保留 reduced/filtered 证据与 rejection manifest | 不可以 |
 
-默认不设置 `B200_ALLOW_REDUCED_HOLMES` 时，脚本会在 GPU 保活仍运行的 CPU path-preflight 阶段停止，并打印 `available=15365/16916`；不会先占用 GPU 再发现数据不完整。
+历史上默认 strict 路径曾在 CPU path-preflight 报 `available=15365/16916` 并停止；当前 standalone strict path、decoder 与 data-class gate 均已通过。每次正式 full 仍会在占用 GPU 前重新执行同一 path/decode gate，因此 standalone 成功不等价于某次 full 已开始或已成功。
 
 ## 手动 full 启动（不由 AI 执行）
 
 在集群 3 上，`b200.env` 已由机器本地配置提供模型、数据、持久根、保活主程序和官方 controller 身份。先从一个干净、已部署的仓库工作树执行。每个 `RUN_ROOT` 必须是新目录。
 
-严格路径（仅在媒体已补齐为 16,916 条后才会越过数据 gate）：
+严格 KTR（仅在完整媒体且本次 mixed decoder `0 rejection` 后启动）：
 
 ```bash
 cd <REPO_ROOT>
@@ -89,7 +89,7 @@ RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-<UTC> \
 ./run_full_b200.sh
 ```
 
-当前数据可执行的 reduced KTR 路径（不可标为严格全量）：
+历史 reduced KTR 路径（仅用于定位；不可标为严格全量）：
 
 ```bash
 cd <REPO_ROOT>
@@ -100,13 +100,12 @@ RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-reduced-<
 ./run_full_b200.sh
 ```
 
-公平资源对照应使用同一数据 gate 和同一 source commit 再单独运行 baseline，不能两者并行抢占卡：
+严格 paired 对照必须使用同一 clean commit、相同 strict data gate，并且先 KTR、后 baseline 串行运行，不能两者并行抢占卡：
 
 ```bash
 B200_ALLOW_PAUSE_KEEPALIVE=1 \
-B200_ALLOW_REDUCED_HOLMES=1 \
 VARIANT=baseline \
-RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/baseline-reduced-<UTC> \
+RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/baseline-strict-<UTC> \
 ./run_full_b200.sh
 
 <B200_PYTHON> src/grpo_compare_runs.py \
