@@ -3,7 +3,8 @@
 #
 # This script deliberately keeps the CUDA-coupled PyTorch and FlashAttention
 # packages supplied by the B200 image.  It installs only the pinned Python
-# stack from offline wheelhouses into a venv made with --system-site-packages.
+# stack from offline wheelhouses into a clean venv.  The CUDA-dependent image
+# runtime is exposed only through explicit, ordered .pth entries.
 # It is safe to run on the paired CPU pod (provisioning/import validation) or
 # on the B200 GPU pod (which additionally proves the 8xB200/FA2 runtime).
 #
@@ -19,6 +20,8 @@
 #   B200_ENV_GPU_RUNTIME_CHECK defaults to 1; set to 0 only when provisioning
 #                              on an occupied GPU node and defer the FA2
 #                              kernel exercise to somke-b200.sh.
+#   B200_RECREATE_VENV         defaults to 0; set to 1 to move aside a legacy
+#                              venv created with system-site-packages.
 
 set -Eeuo pipefail
 
@@ -166,13 +169,26 @@ else
     log "no usable NVIDIA device found; provisioning/import validation will run in paired-CPU mode"
 fi
 
+if [[ -x "${venv_python}" ]] \
+    && ! grep -Eq '^include-system-site-packages = false$' "${venv_dir}/pyvenv.cfg"; then
+    if [[ "${B200_RECREATE_VENV:-0}" != "1" ]]; then
+        die "existing venv is not isolated; set B200_RECREATE_VENV=1 to move it aside and rebuild"
+    fi
+    venv_resolved="$(realpath -e "${venv_dir}")"
+    [[ "${venv_resolved}" == "${b200_root}/venv" ]] \
+        || die "refusing to move an unexpected venv path: ${venv_resolved}"
+    archived_venv="${b200_root}/venv.pre-isolation-$(date -u +%Y%m%dT%H%M%SZ)"
+    log "moving legacy non-isolated venv aside to ${archived_venv}"
+    mv "${venv_resolved}" "${archived_venv}"
+fi
+
 if [[ ! -x "${venv_python}" ]]; then
     log "creating isolated venv at ${venv_dir} from ${base_python}"
-    "${base_python}" -m venv --system-site-packages "${venv_dir}"
+    "${base_python}" -m venv "${venv_dir}"
 else
     [[ -f "${venv_dir}/pyvenv.cfg" ]] || die "existing venv is missing pyvenv.cfg: ${venv_dir}"
-    grep -Eq '^include-system-site-packages = true$' "${venv_dir}/pyvenv.cfg" \
-        || die "existing venv was not created with --system-site-packages: ${venv_dir}"
+    grep -Eq '^include-system-site-packages = false$' "${venv_dir}/pyvenv.cfg" \
+        || die "existing venv is not isolated: ${venv_dir}"
     log "reusing existing isolated venv: ${venv_dir}"
 fi
 
@@ -189,11 +205,10 @@ PY
 )"
 [[ -d "${venv_site}" ]] || die "venv site-packages directory is unavailable: ${venv_site}"
 
-# ``venv --system-site-packages`` follows the base interpreter (often
-# /usr/bin/python), not necessarily the CUDA-ready platform interpreter
-# selected above.  Add the selected platform's own site directories after the
-# venv site directory, so pinned venv packages override the image while the
-# CUDA-matched torch, torchvision, and FlashAttention-2 remain inherited.
+# A base interpreter can create a venv from a different Python prefix.  Add
+# only the selected CUDA-ready platform's own site directories after the venv
+# site directory, so pinned venv packages override the image while unrelated
+# system packages (including a broken global Apex) cannot leak into training.
 platform_prefix="$("${base_python}" - <<'PY'
 import sys
 print(sys.prefix)
@@ -264,8 +279,67 @@ DS_BUILD_OPS=0 "${venv_python}" -m pip install --no-index --no-deps --no-build-i
     "${grpo_wheelhouse}/deepspeed-0.15.4.tar.gz" \
     "${grpo_wheelhouse}/rouge_score-0.1.2.tar.gz"
 
-log "checking the resolved offline dependency graph"
-"${venv_python}" -m pip check
+log "checking the resolved project dependency closure (excluding unrelated image packages)"
+"${venv_python}" - <<'PY'
+from collections import deque
+from importlib import metadata
+
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+roots = (
+    "transformers",
+    "tokenizers",
+    "huggingface-hub",
+    "av",
+    "trl",
+    "datasets",
+    "accelerate",
+    "deepspeed",
+    "peft",
+    "einops",
+    "nltk",
+    "sentencepiece",
+    "torch",
+    "torchvision",
+    "flash-attn",
+)
+environment = default_environment()
+environment["extra"] = ""
+pending = deque(canonicalize_name(name) for name in roots)
+seen: set[str] = set()
+errors: list[str] = []
+
+while pending:
+    name = pending.popleft()
+    if name in seen:
+        continue
+    seen.add(name)
+    try:
+        requirements = metadata.requires(name) or ()
+    except metadata.PackageNotFoundError:
+        errors.append(f"missing root/dependency distribution: {name}")
+        continue
+    for raw_requirement in requirements:
+        requirement = Requirement(raw_requirement)
+        if requirement.marker is not None and not requirement.marker.evaluate(environment):
+            continue
+        dependency = canonicalize_name(requirement.name)
+        try:
+            installed = metadata.version(dependency)
+        except metadata.PackageNotFoundError:
+            errors.append(f"{name} requires {requirement}, but {dependency} is missing")
+            continue
+        if requirement.specifier and installed not in requirement.specifier:
+            errors.append(f"{name} requires {requirement}, but installed {dependency}=={installed}")
+        pending.append(dependency)
+
+if errors:
+    rendered = "\n".join(f"  - {item}" for item in sorted(set(errors)))
+    raise SystemExit("project dependency closure is inconsistent:\n" + rendered)
+print(f"[b200-env] project dependency closure verified ({len(seen)} distributions)")
+PY
 
 export B200_ENV_MANIFEST_PATH="${manifest_path}"
 export B200_ENV_VENV_DIR="${venv_dir}"
