@@ -20,11 +20,13 @@ env_file="${B200_ENV_FILE:-${b200_root}/b200.env}"
 explicit_b200_names=()
 explicit_b200_values=()
 for name in \
-    B200_ROOT B200_ENV_FILE B200_RUN_ROOT RUN_ROOT PYTHON_BIN B200_MODEL_PATH B200_DATA_ROOT \
+    B200_ROOT B200_ENV_FILE B200_RUN_ROOT RUN_ROOT VARIANT MAX_STEPS PYTHON_BIN B200_MODEL_PATH B200_DATA_ROOT \
     B200_DATASET_SOURCE B200_KEEPALIVE_MAIN B200_KEEPALIVE_LAUNCHER \
     B200_ALLOW_PAUSE_KEEPALIVE B200_ALLOW_REDUCED_HOLMES \
     B200_ALLOW_DECODER_FILTERED B200_SMOKE_RUN_ROOT B200_ENV_MANIFEST \
-    B200_MODEL_INTEGRITY_MANIFEST B200_MODEL_SHA256_MANIFEST; do
+    B200_MODEL_INTEGRITY_MANIFEST B200_MODEL_SHA256_MANIFEST \
+    B200_MEDIA_DECODE_WORKERS B200_MEDIA_DECODE_TIMEOUT_SECONDS \
+    B200_MEDIA_DECODE_PROGRESS_EVERY B200_MEDIA_DECODE_STATUS_SECONDS; do
     if [[ -v "${name}" ]]; then
         explicit_b200_names+=("${name}")
         explicit_b200_values+=("${!name}")
@@ -56,8 +58,9 @@ allow_pause="${B200_ALLOW_PAUSE_KEEPALIVE:-0}"
 allow_reduced="${B200_ALLOW_REDUCED_HOLMES:-0}"
 allow_decoder_filtered="${B200_ALLOW_DECODER_FILTERED:-0}"
 
-# These are fixed by the upstream-aligned B200 profile.  Only MAX_STEPS is
-# intentionally overrideable for an explicitly bounded diagnostic run.
+# The training shape is fixed by the upstream-aligned B200 profile.  MAX_STEPS
+# is overrideable for bounded diagnostics; media decode controls affect only
+# the CPU preflight, not the dataset or training shape.
 nproc_per_node=8
 max_prompt_length=16384
 max_completion_length=768
@@ -72,7 +75,7 @@ save_total_limit=2
 heartbeat_seconds="${HEARTBEAT_SECONDS:-30}"
 gpu_sample_seconds="${GPU_SAMPLE_SECONDS:-5}"
 decoder_workers="${B200_MEDIA_DECODE_WORKERS:-8}"
-decoder_timeout_seconds="${B200_MEDIA_DECODE_TIMEOUT_SECONDS:-120}"
+decoder_timeout_seconds="${B200_MEDIA_DECODE_TIMEOUT_SECONDS:-600}"
 decoder_progress_every="${B200_MEDIA_DECODE_PROGRESS_EVERY:-100}"
 decoder_status_seconds="${B200_MEDIA_DECODE_STATUS_SECONDS:-30}"
 ddp_timeout_seconds="${DDP_TIMEOUT_SECONDS:-600}"
@@ -811,7 +814,7 @@ if [[ "${allow_reduced}" == "1" ]]; then
 fi
 run_logged_preflight "Holmes strict/reduced class gate" "${path_gate_args[@]}"
 
-log "phase 6/8: CPU-only mixed image/video Qwen decode preflight; terminal will show throughput and ETA"
+log "phase 6/8: CPU-only mixed image/video Qwen decode preflight; workers=${decoder_workers}, per-record timeout=${decoder_timeout_seconds}s; terminal will show throughput and ETA"
 run_logged_preflight "mixed media decode verification" \
     env CUDA_VISIBLE_DEVICES="" \
     "${python_bin}" -u "${project_root}/src/grpo_verify_media_decode.py" \
@@ -868,6 +871,7 @@ write_source_provenance "${run_root}/source_provenance.txt"
     printf 'model_integrity_manifest=%s\nenvironment_manifest=%s\n' "${model_integrity_manifest}" "${environment_manifest}"
     printf 'nproc_per_node=8\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\n'
     printf 'requested_cli_max_pixels=401408\nqwen_file_video_effective_cap=105369\nobserved_smoke_video_pixels=94080-98784\nnframes=8\n'
+    printf 'media_decode_workers=%s\nmedia_decode_timeout_seconds=%s\n' "${decoder_workers}" "${decoder_timeout_seconds}"
     printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\n'
     printf 'selection_mode=paper\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\n'
     printf 'temporal_permutations=1\ntemporal_include_reverse=false\ntemporal_seed=43\n'

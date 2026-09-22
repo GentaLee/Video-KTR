@@ -64,9 +64,9 @@ KTR token report 共保存 768 个 union token，均位于 CoT：`E=341`、`V=59
 
 ## 数据与严格复现边界
 
-集群 3 已补齐并路径核验 `16,916 / 16,916` 条 Holmes 记录，其中 `8,765` 条图像、`8,151` 条视频；补齐了 233 个训练视频媒体路径。随后独立的 canonical mixed decoder 与 data-class gate 也已通过：CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408`，`verified=16,916`、`rejected=0`、`timed_out=0`，类别为 `strict-holmes-16k`。因此：
+集群 3 已补齐并路径核验 `16,916 / 16,916` 条 Holmes 记录，其中 `8,765` 条图像、`8,151` 条视频；补齐了 233 个训练视频媒体路径。独立的 120 秒 mixed decoder/data-class gate 曾通过 `16,916 / 16,916`。但首次 strict KTR full 在 CPU 预检重跑时，两条引用同一个长视频的记录超过 120 秒，只得到 `16,914 / 16,916`，严格 data-class gate exit=1。因此：
 
-- 默认 strict full 会在本次启动中再次要求完整 `16,916` 条都通过媒体 decode 预检（`rejected=0`、`timed_out=0`）；本次 standalone gate 已满足该前置条件，但不等价于 full 已启动。
+- 修复后的 strict full 对每条媒体设置 600 秒 CPU 预检上限；本次启动仍须完整 `16,916` 条都通过（`rejected=0`、`timed_out=0`）才能进入 GPU。600 秒是预检容错上限，不改变训练算法或媒体数据。
 - 历史 `15,365` 条 run 必须永久保留 `reproduction_class=reduced-media-subset` 标记；媒体后来补齐不改变其冻结的数据契约。
 - full 启动前会以训练相同的 Qwen/torchvision 路径检查混合图像和视频，并实时报告吞吐与 ETA；若 decode 有 rejection，默认拒绝，另需显式 `B200_ALLOW_DECODER_FILTERED=1` 才能以额外 filtered 降级继续。
 
@@ -74,4 +74,4 @@ KTR token report 共保存 768 个 union token，均位于 CoT：`E=341`、`V=59
 
 ## 下一步
 
-`somke-b200.sh` 已成功完成最终 smoke；strict standalone decoder/data-class gate 也已通过，尚无 B200 `torchrun` / GPU full epoch。一个历史 reduced wrapper 已在 CPU decoder data-class gate fail-closed；操作者现在才可按 KTR、baseline 的顺序串行启动。每次 full 会在训练期间暂停已核验的保活，且无论成功、失败或中断都会确认训练进程退出后恢复保活。严格和降级两种启动命令、环境契约、FA2 兼容处理、数据下载/补齐清单及完整证据索引均见 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md)。
+`somke-b200.sh` 已成功完成最终 smoke；首次 strict full 的 120 秒媒体门禁失败，尚无 B200 `torchrun` / GPU full epoch。修复后的启动脚本会在终端显示并记录 600 秒预检上限；操作者须以新 run root 重试 strict KTR，并在其成功后串行启动采用相同设置的 baseline。每次 full 会在训练期间暂停已核验的保活，且无论成功、失败或中断都会确认训练进程退出后恢复保活。环境契约、FA2 兼容处理、数据门禁与证据索引见 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md)。

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 
@@ -35,6 +38,47 @@ class B200FullLauncherContractTests(unittest.TestCase):
         self.assertIn("B200_ALLOW_REDUCED_HOLMES", LAUNCHER)
         self.assertIn("B200_ALLOW_DECODER_FILTERED", LAUNCHER)
         self.assertIn("FORCE_QWENVL_VIDEO_READER=torchvision", LAUNCHER)
+
+    def test_command_line_decode_timeout_survives_private_env_file(self) -> None:
+        """The operator's 600-second override must win over a stale local default."""
+        marker = 'timestamp="$(date -u +%Y%m%dT%H%M%SZ)"'
+        self.assertIn(marker, LAUNCHER)
+        prefix = LAUNCHER.split(marker, 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env_file = root / "b200.env"
+            env_file.write_text(
+                "B200_MEDIA_DECODE_TIMEOUT_SECONDS=120\n"
+                "B200_MEDIA_DECODE_WORKERS=4\n"
+                "VARIANT=baseline\n"
+                "MAX_STEPS=1\n",
+                encoding="utf-8",
+            )
+            probe = root / "probe.sh"
+            probe.write_text(
+                prefix
+                + '\nprintf "%s,%s,%s,%s\\n" "$B200_MEDIA_DECODE_TIMEOUT_SECONDS" "$B200_MEDIA_DECODE_WORKERS" "$VARIANT" "$MAX_STEPS"\n',
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update(
+                B200_ROOT=str(root),
+                B200_ENV_FILE=str(env_file),
+                B200_MEDIA_DECODE_TIMEOUT_SECONDS="600",
+                B200_MEDIA_DECODE_WORKERS="8",
+                VARIANT="ktr",
+                MAX_STEPS="-1",
+            )
+            result = subprocess.run(
+                ["bash", str(probe)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(result.stdout.strip(), "600,8,ktr,-1")
+        self.assertIn("media_decode_timeout_seconds=%s", LAUNCHER)
+        self.assertIn("media_decode_workers=%s", LAUNCHER)
 
     def test_keeps_protection_running_until_gpu_phase_and_restores_by_controller(self) -> None:
         self.assertLess(

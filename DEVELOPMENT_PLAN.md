@@ -7,7 +7,7 @@
 
 ## 0. 当前 B200 执行计划（active）
 
-集群 3 已完成 8×B200 paired smoke；baseline/KTR 各有一次真实 optimizer step，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测与保活恢复均为 PASS。尚无 B200 `torchrun` / GPU full epoch；历史 reduced wrapper 已在 CPU decoder data-class gate fail-closed，正式 full 仍必须由操作者手动启动。
+集群 3 已完成 8×B200 paired smoke；baseline/KTR 各有一次真实 optimizer step，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测与保活恢复均为 PASS。首次 strict KTR full wrapper 在 CPU 媒体预检后因两条 120 秒超时而 exit=1；尚无 B200 `torchrun` / GPU full epoch，保活未暂停。修复后的 full 仍必须由操作者手动启动。
 
 | 阶段 | 状态 | 可复查证据 / 下一步 |
 | --- | --- | --- |
@@ -16,14 +16,16 @@
 | B200 paired smoke | 已通过 | 8 条固定**视频**、8 ranks、prompt=16384、completion=768、G=8、FA2、8 帧；baseline 94.840 s，KTR 95.008 s；不是 mixed sampler 分布式覆盖 |
 | selector 语义 | 已通过 | E/V 每 completion 精确 top-20%；视频 T 同样精确 top-20%，image T 设计为全零；absolute delta、每 rank/step 单个非恒等置换、分离 image/video token ID |
 | Holmes path 数据 | strict path gate 已通过 | `16,916 / 16,916`（8765 image + 8151 video）；233 个训练视频已补齐 |
-| mixed media decode | strict standalone gate 已通过 | CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408`；`verified=16916`、`rejected=0`、`timed_out=0`，data-class=`strict-holmes-16k` |
-| B200 full KTR / baseline | 待操作者启动 | 使用 `run_full_b200.sh`；两个 variant 需串行运行并比较 artifact |
+| mixed media decode | standalone 120 秒 gate 通过；首次 strict full 120 秒 gate 失败 | 同一 source SHA 下，standalone `16916/16916`；full `16914/16916`、2 timeout 指向同一长视频；新预检上限 600 秒待 full 重验 |
+| B200 full KTR / baseline | KTR wrapper 已在 GPU 前失败；待操作者重启 | 使用修复后的 `run_full_b200.sh`、独立新 run root；两个 variant 使用同一 600 秒预检策略串行运行并比较 artifact |
 
-独立 strict decoder/data-class gate 已通过；每次 strict full 仍会在占用 GPU 前重跑 gate。历史 reduced 路径仍只保留用于定位：
+120 秒 standalone strict decoder/data-class gate 曾通过，但首次 full 重跑出现 2 条 timeout。修复只增加 CPU 预检的单条超时上限；每次 strict full 仍须在占用 GPU 前达到 `16916/16916`、0 rejection。历史 reduced 路径仍只保留用于定位：
 
 ```bash
 # strict：仅当 16,916 条媒体均可用且 decode=0 rejection 时才会通过
-B200_ALLOW_PAUSE_KEEPALIVE=1 VARIANT=ktr ./run_full_b200.sh
+B200_ALLOW_PAUSE_KEEPALIVE=1 B200_ALLOW_REDUCED_HOLMES=0 \
+  B200_ALLOW_DECODER_FILTERED=0 B200_MEDIA_DECODE_TIMEOUT_SECONDS=600 \
+  VARIANT=ktr ./run_full_b200.sh
 
 # 历史 reduced/诊断：输出会标为 reproduction_class=reduced-media-subset
 B200_ALLOW_PAUSE_KEEPALIVE=1 B200_ALLOW_REDUCED_HOLMES=1 \

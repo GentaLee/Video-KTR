@@ -4,7 +4,7 @@
 
 ## 当前结论
 
-集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。尚无 B200 `torchrun` / GPU full epoch；一个历史 reduced wrapper 已在 CPU decoder data-class gate fail-closed，正式 full 仍仅由操作者手动运行 [run_full_b200.sh](run_full_b200.sh)。
+集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。首次 strict KTR full wrapper 在 CPU 媒体预检中因两条 120 秒超时而 exit=1，未进入 `torchrun` / GPU full epoch；保活保持运行。修复后的 full 仍仅由操作者手动运行 [run_full_b200.sh](run_full_b200.sh)。
 
 | 项目 | B200 实现 / 已验证值 | 对齐状态 |
 | --- | --- | --- |
@@ -60,12 +60,13 @@ Artifact 根为 `<共享持久卷>/video-ktr-b200/artifacts/grpo-smoke-b200/2026
 | 旧选择器不符合当前验收定义 | 旧路径包含 5 次置换、batch quantile、signed delta，且视频 id 曾误用图像 id | 设为单次非恒等乱序、per-completion 精确 top-20%、absolute delta、分离 image/video id | 改任一选择定义必须重跑 smoke |
 | 文件型视频的像素数看似未到 401408 | vendored qwen-vl-utils 对单帧还有约 105369 的硬上限 | 保留上游 CLI `--max_pixels 401408`，并在 profile 同时记录 requested/effective/observed 值 | 若要求实际逐帧 401408，须建名为 patched-intent 的新 profile、改代码并重跑 smoke |
 | shared-GPU 保活会污染显存/性能数据 | 保活与训练不能同时占用卡 | CPU-only 数据预检时保活运行；仅 GPU FA2/torchrun 前由官方 controller 停止；结束/失败/中断先清理任务再恢复并校验 | 无法证明训练已停时故意不恢复，防止冲突；终端给出人工恢复命令 |
+| 首次 strict full 在媒体预检结束后 fail-closed | 同一个 107.5 MB 视频的两条记录超过 120 秒单条阈值；`16914/16916` 通过，2 timeout | CPU 预检默认阈值改为 600 秒，命令行覆盖可穿过本地 `b200.env`，在 `launch_config.txt` 记录实际阈值与 worker 数 | 600 秒仅是预检容错；每次 full 仍须全部 `16916/16916`、0 rejection 才进入 GPU；新阈值的全量 gate 待操作者启动后验证 |
 
 Qwen rotary 修复对应 [Transformers 上游修正](https://github.com/huggingface/transformers/commit/8ee50537fe7613b87881cd043a85971c85e99519)。它是窄范围兼容 shim，不改变 selector 或训练目标。
 
 ## 数据门禁与降级路径
 
-已补齐并传输 233 个 Video-Holmes 训练视频路径；独立 strict gate 已确认 `16,916 / 16,916`：图像 `8,765 / 8,765`，视频 `8,151 / 8,151`。在 CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408` 的 canonical mixed decoder 中，`verified=16,916`、`rejected=0`、`timed_out=0`；data-class gate 结果为 `strict_holmes_16k=true`、`reproduction_class=strict-holmes-16k`。此前 `15,365` 条的 run 是冻结清单的历史 reduced run，不能因媒体后来补齐而重新标成 strict。
+已补齐并传输 233 个 Video-Holmes 训练视频路径；独立 strict gate 曾在 120 秒单条阈值下确认 `16,916 / 16,916`：图像 `8,765 / 8,765`，视频 `8,151 / 8,151`，data-class 为 `strict-holmes-16k`。但随后首次 strict full 重跑同一数据与配置时，`verified=16,914`、`rejected=2`、`timed_out=2`；两条超时记录指向同一个长视频，data-class gate exit=1。先前的 standalone PASS 仍为历史证据，不能替代本次 full 的门禁结果。此前 `15,365` 条的 run 也继续保留历史 reduced 标记。
 
 | 路径 | 触发条件 | 产物标记 | 是否能称严格 Holmes-16k |
 | --- | --- | --- | --- |
@@ -73,17 +74,20 @@ Qwen rotary 修复对应 [Transformers 上游修正](https://github.com/huggingf
 | historical reduced | 显式 `B200_ALLOW_REDUCED_HOLMES=1`，且冻结为 15,365 条契约 | `reproduction_class=reduced-media-subset` | 不可以 |
 | decoder filtered | decode 有 rejection，另需显式 `B200_ALLOW_DECODER_FILTERED=1` | 仍保留 reduced/filtered 证据与 rejection manifest | 不可以 |
 
-历史上默认 strict 路径曾在 CPU path-preflight 报 `available=15365/16916` 并停止；当前 standalone strict path、decoder 与 data-class gate 均已通过。每次正式 full 仍会在占用 GPU 前重新执行同一 path/decode gate，因此 standalone 成功不等价于某次 full 已开始或已成功。
+失败的 full 使用 8 workers、CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408`、120 秒阈值；其 source SHA 与 standalone PASS 完全一致。新脚本将单条预检超时上限设为 600 秒，既不删媒体也不改变训练参数。它还未经过新的全量 full 预检；每次 full 仍会在占用 GPU 前重新执行 path/decode gate，任一 rejection 都会阻止 strict 训练。
 
 ## 手动 full 启动（不由 AI 执行）
 
 在集群 3 上，`b200.env` 已由机器本地配置提供模型、数据、持久根、保活主程序和官方 controller 身份。先从一个干净、已部署的仓库工作树执行。每个 `RUN_ROOT` 必须是新目录。
 
-严格 KTR（仅在完整媒体且本次 mixed decoder `0 rejection` 后启动）：
+严格 KTR 重试（新 run root；本次 mixed decoder 必须 `0 rejection` 才能进入 GPU）：
 
 ```bash
 cd <REPO_ROOT>
 B200_ALLOW_PAUSE_KEEPALIVE=1 \
+B200_ALLOW_REDUCED_HOLMES=0 \
+B200_ALLOW_DECODER_FILTERED=0 \
+B200_MEDIA_DECODE_TIMEOUT_SECONDS=600 \
 VARIANT=ktr \
 RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-<UTC> \
 ./run_full_b200.sh
@@ -104,6 +108,9 @@ RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-reduced-<
 
 ```bash
 B200_ALLOW_PAUSE_KEEPALIVE=1 \
+B200_ALLOW_REDUCED_HOLMES=0 \
+B200_ALLOW_DECODER_FILTERED=0 \
+B200_MEDIA_DECODE_TIMEOUT_SECONDS=600 \
 VARIANT=baseline \
 RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/baseline-strict-<UTC> \
 ./run_full_b200.sh
@@ -140,4 +147,4 @@ KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start
 └── training_summary.md / training_summary.json
 ```
 
-full 成功的最低条件是脚本零退出、`training_complete.json` 与 `training_summary.json` 标记成功、数据/源码 provenance 存在、保活恢复为唯一已验证实例。对于 baseline/KTR 比较，还必须确认二者 `data_gate.json`、关键源码 hash 与 profile 相同。
+full 成功的最低条件是脚本零退出、`training_complete.json` 与 `training_summary.json` 标记成功、数据/源码 provenance 存在、保活恢复为唯一已验证实例。对于 baseline/KTR 比较，还必须确认二者 `data_gate.json`、关键源码 hash、profile 与 `media_decode_timeout_seconds=600` 相同。

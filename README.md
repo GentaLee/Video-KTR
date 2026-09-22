@@ -126,9 +126,9 @@ work: 16,384 prompt tokens, 768 completion tokens, `G=8`,
 FlashAttention-2, Holmes-16k, requested `max_pixels=401408`, and
 `nframes=8`. Its B200 paired smoke has passed, but it is an 8-record
 **video-only** smoke, not distributed mixed image/video sampler coverage; a
-GPU full epoch has **not** been started by this repository workflow; a
-historical reduced wrapper stopped at its CPU decoder data-class gate before
-`torchrun`.
+GPU full epoch has **not** been started by this repository workflow. The first
+strict KTR wrapper stopped at its CPU decoder data-class gate after two
+120-second media timeouts, before `torchrun`.
 
 The B200 path uses `paper/per_completion`: E/V receive an exact top-20% mask
 per completion; T receives the same exact top-20% selection for video
@@ -144,16 +144,22 @@ full job.  The strict command proceeds only after all 16,916 Holmes media
 records are present and mixed-media decoder verification has no rejection:
 
 ```bash
-B200_ALLOW_PAUSE_KEEPALIVE=1 VARIANT=ktr ./run_full_b200.sh
+B200_ALLOW_PAUSE_KEEPALIVE=1 \
+B200_ALLOW_REDUCED_HOLMES=0 \
+B200_ALLOW_DECODER_FILTERED=0 \
+B200_MEDIA_DECODE_TIMEOUT_SECONDS=600 \
+VARIANT=ktr ./run_full_b200.sh
 ```
 
 The historical `15,365 / 16,916` media subset required an explicit opt-in and
 is labeled `reduced-media-subset`; it is not a strict full-data result. The
 233 missing training-video paths have since been restored. A standalone
-canonical path, mixed-media decoder, and data-class gate passed with all
-`16,916` records and zero rejections/timeouts. Each full launch repeats that
-gate before GPU work; the following reduced command is historical
-diagnostic-only, not the current strict route:
+120-second mixed-media gate passed all `16,916` records, but the first full
+preflight verified only `16,914`: two references to the same long video timed
+out. The launcher now allows 600 seconds per record in CPU preflight and
+records that setting. Each full launch still requires all `16,916` records
+with zero rejections before GPU work. Use the same 600-second setting for
+baseline; the following reduced command is historical diagnostic-only:
 
 ```bash
 B200_ALLOW_PAUSE_KEEPALIVE=1 \

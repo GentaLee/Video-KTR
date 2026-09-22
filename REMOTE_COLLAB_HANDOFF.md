@@ -375,7 +375,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | --- | --- | --- |
 | 上游参数 | 8 ranks、prompt=16384、completion=768、G=8、FA2、1 epoch、save step=100 | `save_total_limit=2` 是持久存储折中，记录在 `launch_config.txt` |
 | mixed data | `grpo_prepare_dataset.py --data-type all` 后由 `grpo_verify_media_decode.py` 在 CUDA-hidden spawned CPU worker 解码 image/video，硬超时、rejections、吞吐/ETA | full 前预检可耗时；worker crash/0 条记录 fail-fast |
-| data strictness | `grpo_validate_b200_dataset.py` 固定核验 Holmes-16k 模态计数 | standalone strict path、mixed decoder 与 data-class gate 均已通过：16916/16916、0 rejection、0 timeout；每次 full 仍在 GPU 前重跑 gate |
+| data strictness | `grpo_validate_b200_dataset.py` 固定核验 Holmes-16k 模态计数 | standalone 120 秒 gate 曾为 16916/16916；首次 strict full 在 120 秒预检中只有 16914/16916、2 timeout，data-class fail-closed；修复后每次 full 仍须 16916/16916、0 rejection |
 | smoke lineage | `grpo_validate_b200_smoke.py` 检查成功 marker、两个 completion、profile、clean Git、smoke ancestor 和关键训练源码 SHA | launcher/文档后续提交可存在；训练关键源码变化必须重跑 smoke |
 | 保活 | 外层 `run_full_b200.sh` 使用官方 controller；CPU preflight 时保活运行，只有 GPU preflight/torchrun 时暂停 | cleanup 先停本任务、确认 GPU 空闲，再恢复且确保唯一实例；不使用 `pkill` |
 | 可观测性 | terminal.log、GPU JSONL、heartbeat、torchrun logs、source/data/smoke provenance | full 必须实际结束才可声称 `training_complete.json`/summary 成功 |
@@ -384,7 +384,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 ### 数据门禁与手动命令
 
-当前数据状态：16,916 条 source（8,765 image + 8,151 video）；233 个缺失训练视频已补齐。standalone strict mixed decoder 在 CUDA-hidden、torchvision、`nframes=8`、CLI `max_pixels=401408` 下完成 `verified=16916`、`rejected=0`、`timed_out=0`，data-class gate 结果为 `strict_holmes_16k=true`、`reproduction_class=strict-holmes-16k`。历史 15,365 条 run 保留 reduced 标签。
+当前数据状态：16,916 条 source（8,765 image + 8,151 video）；233 个缺失训练视频已补齐。standalone strict mixed decoder 在 120 秒阈值下曾通过 16916/16916；首次 strict KTR full 的同源、同参数重跑有两条长视频引用超时，`verified=16914`、`rejected=2`、`timed_out=2`，data-class gate exit=1。修复后的 CPU 单条预检上限为 600 秒，命令行值会覆盖本地配置并写入 `launch_config.txt`；该新上限的 full gate 尚待操作者运行验证。历史 15,365 条 run 保留 reduced 标签。
 
 ### 补齐 strict Holmes-16k 的匿名步骤
 
@@ -394,9 +394,12 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 4. 只有总数完整且 decode `0 rejection` 时，才可不带任何 reduced/filter opt-in 启动 strict full；否则继续使用明确标记的 reduced/filtered 路径。补齐、gate 与结论必须按第 0 节发一条新的 `KT-HANDOFF/v1` 记录。
 
 ```bash
-# strict：仅在补齐为 16,916 且 mixed decoder 无 rejection 后通过
+# strict：本次 full 仍须 16,916 条全部通过 mixed decoder 后才进入 GPU
 cd <REPO_ROOT>
 B200_ALLOW_PAUSE_KEEPALIVE=1 \
+  B200_ALLOW_REDUCED_HOLMES=0 \
+  B200_ALLOW_DECODER_FILTERED=0 \
+  B200_MEDIA_DECODE_TIMEOUT_SECONDS=600 \
   VARIANT=ktr \
   RUN_ROOT=<共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-<UTC> \
   ./run_full_b200.sh
@@ -409,13 +412,13 @@ B200_ALLOW_PAUSE_KEEPALIVE=1 \
   ./run_full_b200.sh
 ```
 
-资源对照要用同一 clean commit、同一 data gate 串行再跑 baseline；不要同时占卡。full 的 GPU 阶段成功、失败、TERM/HUP 都会自动尝试恢复保活。仅当自动恢复失败且已确认 torchrun/rank 进程完全退出时，才使用：
+资源对照要用同一 clean commit、同一 strict data gate 和同一 `B200_MEDIA_DECODE_TIMEOUT_SECONDS=600` 串行再跑 baseline；不要同时占卡。full 的 GPU 阶段成功、失败、TERM/HUP 都会自动尝试恢复保活。仅当自动恢复失败且已确认 torchrun/rank 进程完全退出时，才使用：
 
 ```bash
 KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start
 ```
 
-当前 `RUNNING` 状态：历史 reduced KTR wrapper 已在 CPU-only decoder data-class gate fail-closed（2 条记录、同一物理视频的 timeout），未启动 `torchrun`；standalone strict 16,916 条 decoder/data-class gate 已通过。已验证外部保活主进程为唯一实例；尚无本项目 B200 `torchrun` / GPU full epoch。每次正式 full 仍会在 GPU 前重跑 gate，并仅由官方 controller 暂停/恢复保活。
+当前 `RUNNING` 状态：首次 strict KTR full wrapper 已在 CPU-only decoder data-class gate exit=1（2 条记录、同一物理视频的 120 秒 timeout），未启动 `torchrun`；standalone strict 16,916 条的历史 PASS 不能覆盖此次失败。已验证外部保活主进程为唯一实例；尚无本项目 B200 `torchrun` / GPU full epoch。修复后的 full 仍会在 GPU 前重跑 gate，并仅由官方 controller 暂停/恢复保活。
 
 ### 最新 active 状态记录（可直接续写）
 
@@ -536,5 +539,29 @@ RUNNING: 外部保活为唯一已验证实例；无本项目 decoder、torchrun 
 RECOVERY: 不需要手工停止保活；正式 full 仅使用官方 controller 管理暂停与恢复。仅自动恢复失败且确认全部 torchrun/rank 已退出时使用 `KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start`。
 FIRST_COMMAND: tail -n 40 <共享持久卷>/video-ktr-b200/artifacts/strict-data-gate-<UTC>/data_gate.log
 NEXT: 操作者先手动启动 strict KTR；仅在其 exit=0、`training_complete.json` 与保活恢复均通过后，再以独立新 run-root 启动 strict baseline；最后运行对比脚本并要求通过。
+ASK: NONE
+```
+
+```text
+[KT-HANDOFF/v1]
+ID: 20260922-AI-006
+TIME_UTC: 2026-09-22T10:21:19Z
+FROM / TO: AI / 远程协作者
+TYPE: UPDATE
+STATUS: PASSED
+STATE_CHANGE: 首次 strict KTR full 在 120 秒 CPU 媒体门禁失败；已修复启动脚本的预检超时默认值、命令行覆盖优先级和配置记录。PASSED 仅指修复检查，尚未重跑 full。
+SCOPE: 集群 3 strict KTR 预检失败诊断、600 秒超时策略与手动重试条件
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；失败运行源码 commit=03fcc4c；修复提交=本记录所在 Git commit；run=grpo-full-b200/ktr-strict-20260922T083532Z
+CLAIM: 失败由同一长视频的两条记录超过 120 秒预检阈值引起；strict data-class gate 正确拒绝，未进入 GPU 训练。修复后的 600 秒策略仍须在新 full run 中验证 16916/16916。
+EVIDENCE: standalone 120 秒 gate=16916/16916、0 timeout；失败 full 同一 source SHA、8 workers、torchvision、CUDA-hidden、nframes=8、CLI max_pixels=401408，decoder=16914/16916、rejected=2、timed_out=2；两条记录均为同一视频，source indices=2166/5549；data-class exit=1、torchrun=0；此前单视频 600 秒诊断耗时 112 秒并通过；launcher override 测试 7/7 通过，`bash -n`、`git diff --check` 通过。
+CHANGES: `run_full_b200.sh` 默认单条 CPU 预检超时设为 600 秒，保留命令行 `B200_MEDIA_DECODE_TIMEOUT_SECONDS` 对本地配置的优先级，终端和 `launch_config.txt` 记录实际超时与 workers；补充回归测试和本次交接文档。未改媒体、模型或训练目标。
+EXECUTED: 只读核对失败 run 的 terminal/decoder/rejections、与 standalone manifest 对比、保活与训练进程检查；本地脚本语法和超时覆盖测试。未重启训练或操作保活。
+ARTIFACTS: <共享持久卷>/video-ktr-b200/artifacts/grpo-full-b200/ktr-strict-20260922T083532Z/terminal.log；Holmes-16k-media-decoder-verified.json.manifest.json；Holmes-16k-media-decoder-verified.json.rejections.json；此前 standalone strict-data-gate-<UTC>/data_gate.json。
+RISK / ROLLBACK: 600 秒是 CPU 预检容错上限，不是 120 秒配置的再次通过证据；重试若仍有任一 rejection，则继续 fail-closed。不得用 reduced/filter opt-in 把失败数据称为 strict。KTR 与 baseline 必须使用同一 600 秒策略串行执行。
+LAST_VERIFIED: 失败 wrapper exit=1 且未启动 torchrun；外部保活主进程唯一；本地 launcher 覆盖测试通过。
+RUNNING: 无本项目 full wrapper 或 torchrun；外部保活运行。下次检查=操作者手动重启 KTR 后的 decoder/data-class gate。
+RECOVERY: 当前无需手工操作保活；仅正式训练结束后自动恢复失败、且全部 rank 退出时，才通过官方 controller 恢复。
+FIRST_COMMAND: cd <REPO_ROOT> && git status --short && git rev-parse --short HEAD
+NEXT: 操作者在已部署的干净修复提交上，以新 run root、`B200_MEDIA_DECODE_TIMEOUT_SECONDS=600` 和两个降级开关为 0 手动重启 strict KTR；KTR 成功并恢复保活后，用相同设置启动 baseline。
 ASK: NONE
 ```
