@@ -98,6 +98,8 @@ training_pid=""
 summary_written=0
 training_dataset_json=""
 resume_global_step=""
+resume_probe_file=""
+resume_safe_globals="none"
 decoder_manifest=""
 
 # Never append a log to an existing artifact. ``mkdir`` of the leaf is the
@@ -647,7 +649,13 @@ if [[ -n "${resume_from_checkpoint}" ]]; then
         log "ERROR: resume checkpoint has model_shards=${resume_model_shards}, optimizer_shards=${resume_optimizer_shards}; need at least ${nproc_per_node} of each"
         exit 2
     fi
-    log "resume preflight: ${resume_global_step}; model_shards=${resume_model_shards}; optimizer_shards=${resume_optimizer_shards}"
+    resume_probe_file="$(find "${resume_state_dir}" -maxdepth 1 -type f -name '*_model_states.pt' -size +0c -print -quit)"
+    if [[ -z "${resume_probe_file}" ]]; then
+        log "ERROR: resume checkpoint has no readable model-state shard for the safe-global preflight"
+        exit 2
+    fi
+    resume_safe_globals="deepspeed.runtime.zero.config.ZeroStageEnum,deepspeed.runtime.fp16.loss_scaler.LossScaler"
+    log "resume preflight: ${resume_global_step}; model_shards=${resume_model_shards}; optimizer_shards=${resume_optimizer_shards}; restricted safe-global compatibility will be checked before torchrun"
 fi
 case "${full_output_selected_token}" in
     1|true|TRUE) full_output_selected_token=true ;;
@@ -711,6 +719,15 @@ export GRPO_EXPECTED_GPU_COUNT="${nproc_per_node}"
 export FORCE_QWENVL_VIDEO_READER="${video_reader_backend}"
 export VIDEO_KTR_RANK_TRACE="${rank_phase_trace}"
 export DEEPSPEED_TIMEOUT="${DEEPSPEED_TIMEOUT:-${deepspeed_timeout_minutes}}"
+if [[ -n "${TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD:-}" ]]; then
+    log "WARNING: clearing inherited TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD; resume uses the narrower restricted safe-global compatibility path"
+    unset TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD
+fi
+if [[ -n "${resume_probe_file}" ]]; then
+    export GRPO_RESUME_CHECKPOINT_PROBE="${resume_probe_file}"
+else
+    unset GRPO_RESUME_CHECKPOINT_PROBE
+fi
 if [[ "${nccl_diagnostics}" == "true" ]]; then
     # Blocking waits disable the watchdog in this PyTorch build, which would
     # suppress the very timeout dump needed to identify a rank divergence.
@@ -876,7 +893,7 @@ training_dataset_sha256="$(sha256sum "${training_dataset_json}" | awk '{print $1
     printf 'save_steps=%s\nsave_total_limit=%s\nselection_mode=paper\nselection_scope=per_completion\n' "${save_steps}" "${save_total_limit}"
     printf 'ddp_timeout_seconds=%s\ndeepspeed_timeout_minutes=%s\nnccl_diagnostics=%s\nrank_phase_trace=%s\nds3_gather_for_generation=%s\nskip_final_model_save=%s\n' "${ddp_timeout_seconds}" "${deepspeed_timeout_minutes}" "${nccl_diagnostics}" "${rank_phase_trace}" "${ds3_gather_for_generation}" "${skip_final_model_save}"
     printf 'preflight_only=%s\n' "${preflight_only}"
-    printf 'resume_from_checkpoint=%s\nresume_global_step=%s\n' "${resume_from_checkpoint:-none}" "${resume_global_step:-none}"
+    printf 'resume_from_checkpoint=%s\nresume_global_step=%s\nresume_safe_globals=%s\nresume_probe_file=%s\n' "${resume_from_checkpoint:-none}" "${resume_global_step:-none}" "${resume_safe_globals}" "${resume_probe_file:-none}"
 } > "${run_root}/launch_config.txt"
 
 if [[ "${preflight_only}" == "true" ]]; then

@@ -15,6 +15,7 @@
 import json
 import os
 import re
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +122,41 @@ class GRPOScriptArguments(ScriptArguments):
         default=False,
         metadata={"help": "smoke-only option: do not write the final full model checkpoint"},
     )
+
+
+def legacy_deepspeed_resume_safe_globals(resume_from_checkpoint: Optional[str]):
+    """Allow only the two known DeepSpeed classes in a legacy ZeRO resume.
+
+    PyTorch 2.6 changed :func:`torch.load` to default to ``weights_only=True``.
+    DeepSpeed 0.15.4 does not pass that argument in its checkpoint engine, and
+    its locally generated ZeRO optimizer state serializes ``ZeroStageEnum``
+    and ``LossScaler``.  Keep the secure default rather than globally forcing
+    ``weights_only=False``: each torchrun rank allowlists precisely those
+    DeepSpeed classes only while Trainer restores a checkpoint.
+
+    This function has no effect for fresh runs.  The launcher additionally
+    verifies a small model-state shard through the exact checkpoint-engine
+    call before it starts torchrun.
+    """
+
+    if not resume_from_checkpoint:
+        return nullcontext()
+
+    import torch
+    from deepspeed.runtime.fp16.loss_scaler import LossScaler
+    from deepspeed.runtime.zero.config import ZeroStageEnum
+
+    safe_globals = getattr(torch.serialization, "safe_globals", None)
+    if safe_globals is None:
+        # Older PyTorch versions retain their historical default
+        # (weights_only=False), so no compatibility allowlist is necessary.
+        return nullcontext()
+    print(
+        "[grpo] enabled restricted legacy DeepSpeed resume safe-globals "
+        "(ZeroStageEnum, LossScaler); weights_only remains enabled",
+        flush=True,
+    )
+    return safe_globals([ZeroStageEnum, LossScaler])
 
 
 
@@ -454,7 +490,8 @@ def main(script_args, training_args, model_args):
     
     if training_args.resume_from_checkpoint is not None:
         checkpoint = training_args.resume_from_checkpoint
-        train_output = trainer.train(resume_from_checkpoint=checkpoint)
+        with legacy_deepspeed_resume_safe_globals(checkpoint):
+            train_output = trainer.train(resume_from_checkpoint=checkpoint)
     else:
         train_output = trainer.train()
 

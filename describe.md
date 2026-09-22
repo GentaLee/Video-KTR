@@ -43,6 +43,8 @@ direct GRPO backward / optimizer，并记录耗时、显存和利用率
 
 旧探索性 full 已在约 `global_step=529` 结束：rank 1/2/3 等待下一次 ZeRO collective，rank 0 停在前一 collective，且显存未到 OOM 范围。最高置信推断是 rank 0 在 generation 前的 whole-file 视频预处理停住；这仍需新的短恢复实际回归验证，不能写成已证明的唯一根因。
 
+首次 checkpoint-500 诊断没有复现该问题：它在任何 batch 之前就因 PyTorch 2.10 默认 `weights_only=True` 拒绝 DeepSpeed 0.15.4 的旧 ZeRO state 而退出，所需类型仅为 `ZeroStageEnum` 和 `LossScaler`。修复保持 `weights_only=True`，只在恢复的 `trainer.train(...)` 作用域内 allowlist 这两个已核验类型；4×H200 已完成 step 500→501 的真实恢复 smoke，包含完整 ZeRO load、生成、E/V/T/union、反向和优化，且结束后 GPU 无残留。step 529 仍待后续受控诊断跨越。
+
 修复后的 launcher 默认先以训练相同的 Qwen/torchvision 视频预处理做 CPU-only、可终止子进程 decode verification；它实时显示吞吐/ETA，写入绑定 source SHA、video root、backend、帧数与像素配置的 manifest/rejection JSON。可恢复的媒体错误才会被过滤；worker 异常退出或 0 条通过会 fail-fast 并保留诊断证据。训练期会保留 rank 0 实时进度、GPU heartbeat、四个 rank 日志；诊断模式还会写每 rank phase trace 和 NCCL timeout 证据。若 decoder 过滤任何视频，结果只能称为“数据质量过滤后的降级复现”。
 
 ## 完整验证
@@ -70,7 +72,7 @@ NCCL_DIAGNOSTICS=1 RANK_PHASE_TRACE=1 \
 ./run_full.sh
 ```
 
-脚本会先筛选路径、随后默认做全量 decoder verification，并连续输出验证 ETA 与训练 heartbeat；写入训练时长/显存/利用率、源码和数据 provenance。历史 full 输入均为 video，诊断恢复会在终端确认使用父类 `RandomSampler`，以保持 checkpoint 的取样契约。预检与训练均被 launcher 跟踪；收到中断时会先停止它们，才恢复此前验证性暂停的保活。NCCL watchdog dump 应从 `training.log`/`torchrun-logs` 与 rank trace 分析，不应假定有可直接传给 `fr_trace.py` 的磁盘文件。未配置保活时会说明没有恢复命令：
+诊断 phase 2 会先核验所有 optimizer shard 的 restricted safe-global 契约，并经同一 DeepSpeed loader 读入一个小 probe；不要设置全局 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`。脚本会先筛选路径、随后默认做全量 decoder verification，并连续输出验证 ETA 与训练 heartbeat；写入训练时长/显存/利用率、源码和数据 provenance。历史 full 输入均为 video，诊断恢复会在终端确认使用父类 `RandomSampler`，以保持 checkpoint 的取样契约。预检与训练均被 launcher 跟踪；收到中断时会先停止它们，才恢复此前验证性暂停的保活。NCCL watchdog dump 应从 `training.log`/`torchrun-logs` 与 rank trace 分析，不应假定有可直接传给 `fr_trace.py` 的磁盘文件。未配置保活时会说明没有恢复命令：
 
 ```bash
 bash <KEEPALIVE_LAUNCHER>

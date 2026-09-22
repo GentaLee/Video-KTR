@@ -53,6 +53,7 @@ from open_r1.trainer.video_ktr_grpo_trainer import (  # noqa: E402
     VideoKTRGRPOTrainer,
 )
 from open_r1.trainer.grpo_trainer import Qwen2VLGRPOTrainer  # noqa: E402
+from open_r1.grpo import legacy_deepspeed_resume_safe_globals  # noqa: E402
 
 
 PACKAGE_HELPER = ROOT / "src" / "r1-v" / "src" / "open_r1" / "trainer" / "ktr_token_utils.py"
@@ -196,6 +197,38 @@ class DecoderVerifierConfigurationTests(unittest.TestCase):
         for value in ("0", "1", "9"):
             with self.assertRaises(Exception):
                 video_decode_verifier._even_nframes(value)
+
+
+class ResumeCompatibilityTests(unittest.TestCase):
+    def test_legacy_deepspeed_safe_globals_are_narrow_and_scoped(self) -> None:
+        events: list[str] = []
+
+        class RecordingContext:
+            def __enter__(self) -> None:
+                events.append("enter")
+
+            def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
+                events.append("exit")
+                return False
+
+        with patch("torch.serialization.safe_globals", return_value=RecordingContext()) as safe_globals:
+            with legacy_deepspeed_resume_safe_globals("/trusted/checkpoint"):
+                self.assertEqual(events, ["enter"])
+        self.assertEqual(events, ["enter", "exit"])
+        allowed = safe_globals.call_args.args[0]
+        self.assertEqual(
+            {item.__module__ + "." + item.__name__ for item in allowed},
+            {
+                "deepspeed.runtime.fp16.loss_scaler.LossScaler",
+                "deepspeed.runtime.zero.config.ZeroStageEnum",
+            },
+        )
+
+    def test_fresh_run_does_not_register_resume_safe_globals(self) -> None:
+        with patch("torch.serialization.safe_globals") as safe_globals:
+            with legacy_deepspeed_resume_safe_globals(None):
+                pass
+        safe_globals.assert_not_called()
 
 
 class ModalityBlockSamplerTests(unittest.TestCase):

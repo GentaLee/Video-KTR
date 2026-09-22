@@ -19,7 +19,7 @@
 | 4×H200 baseline smoke | 历史通过 | 真实 generate → forward → backward → optimizer，`global_step=1`；长度奖励修复前，不能作最终 paired 对比 |
 | 4×H200 KTR smoke | 历史通过 | 三类 CoT token、union mask、真实优化步已验证；修复后须与 baseline 同 commit 重跑 |
 | full 同形状 KTR 容量 smoke | 历史通过（容量） | completion=512、时序置换=5 的真实优化步通过，峰值 92,197 MiB/卡；不作修复后 paired 对比 |
-| 旧完整 video full run | 已失败，待回归诊断 | 在约 step 529 出现 rank 间 collective timeout；checkpoint-500 可用于仅定位的短恢复，不能作正式结果 |
+| 旧完整 video full run | step-501 恢复已通过，待跨越 step-529 回归 | 旧 run 在约 step 529 出现 rank 间 collective timeout；checkpoint-500 的受控恢复已完成完整 ZeRO load 和 step 501，但仍不能作正式结果 |
 | baseline 与 KTR 的完整对比 | 待手动启动 | 两个 full run 都完成后生成 `comparison.md/json` |
 
 这里的 smoke 只证明链路、资源配置和一小步更新可执行；它不等同于完整训练收敛、任务正确率或跨数据集泛化结论。
@@ -131,14 +131,16 @@ KTR 这一步的日志记录了 `E=202`、`V=202`、`T=202`、`U=360` 的 rank-l
 
 这支持但**没有单独证明**下列最高置信假设：rank 0 在下一 collective 前的本地 Qwen 视频预处理停住。当前 reader 是 torchvision whole-file decode，旧 full manifest 只做路径/非空校验，因此异常或极慢视频可造成这种 rank 偏斜。
 
+2026-09-22 的首次 checkpoint-500 诊断在任何 batch 之前失败，原因与旧 step-529 事故不同：PyTorch 2.10 的 `torch.load` 默认 `weights_only=True`，而 DeepSpeed 0.15.4 的旧 ZeRO optimizer shard 含 `ZeroStageEnum` 与 `LossScaler`。四个 rank 都在 checkpoint load 退出，无 rank trace、无 NCCL timeout、无视频 decode。修复后，恢复路径仅在 `trainer.train(resume_from_checkpoint=...)` 的作用域内 allowlist 这两个已静态核验的 DeepSpeed 类，保持 `weights_only=True`；不使用全局 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`。
+
 | 修复 / 诊断 | 实现 | 已验证范围 |
 | --- | --- | --- |
 | 同一路径 decode preflight | `src/grpo_verify_video_decode.py` 在 CPU-only spawned worker 执行 Qwen `fetch_video`（decode、抽帧、resize）；超时后 TERM→KILL，不可杀死或意外 worker crash 则 fail-fast；即使 0 条通过也会留下 failed manifest/rejections | 真实 4-video smoke 为 4/4；16 worker、32-video 抽样为 32/32、0 timeout；0-valid 负向测试确认诊断产物仍会保留；不能外推全量耗时/零 rejection |
 | 训练/预检 reader 一致 | full 强制 `FORCE_QWENVL_VIDEO_READER=torchvision`，并把 source SHA、video root、decoder/backend、nframes/max-pixels 写入 manifest；`NFRAMES` gate 为不小于 2 的偶数 | 静态/非训练 decode smoke 已通过；错误 root 的 reuse manifest 会被拒绝 |
-| rank 轨迹 | `RANK_PHASE_TRACE=1` 时，`training/rank_trace_rank*.jsonl` 记录 decode、generate、policy、V/T、ref、metrics 边界 | 需 checkpoint-500 短恢复实际验证 |
+| rank 轨迹 | `RANK_PHASE_TRACE=1` 时，`training/rank_trace_rank*.jsonl` 记录 decode、generate、policy、V/T、ref、metrics 边界 | checkpoint-500→501 恢复的四 rank 均记录 15 个事件并到达 `metrics_done`；仍须跨过旧 step-529 |
 | generation / ZeRO 保护 | 多 rank 显式 `synced_gpus=True`，并将 `DS3_GATHER_FOR_GENERATION` 传至 TRL unwrap | unit test 覆盖 flag 实际传入；该项不修复 generation 前 decode stall |
 | NCCL 事后证据 | 默认 diagnostics、10 分钟 DDP timeout、per-rank torchrun log、NCCL trace/dump 与失败 marker；watchdog 的内存 trace 写入 rank stderr/log，而非虚构磁盘 `fr_trace.py` 输入 | launcher 静态检查通过；需故障 run 才会产生 dump |
-| resume 语义 | resume 强制新 run root、旧 path-verified JSON、关闭 decoder filtering，校验 4 rank checkpoint shards；历史全 video 数据集走父类 `RandomSampler`，不应用 mixed-modality block sampler | checkpoint-500 结构与历史 sampler contract 已只读核验；短恢复尚待人工执行，且只作故障回归，不作最终数值结果 |
+| resume 语义与 safe load | resume 强制新 run root、旧 path-verified JSON、关闭 decoder filtering，校验 4 rank checkpoint shards；训练时仅 scoped allowlist `ZeroStageEnum`/`LossScaler`；历史全 video 数据集走父类 `RandomSampler`，不应用 mixed-modality block sampler | 4 个 24 GiB optimizer shard 的 unsafe-global 静态扫描均仅为这两个类；预检经同一 DeepSpeed loader 通过，4×H200 从 checkpoint-500 完成 step 501、`phase 7/7: PASS`、结束后 GPU 归零 |
 | launcher 安全预检 | `PREFLIGHT_ONLY=1` 完整执行容量/import/path/decode manifest，但明确不创建 `torchrun`；长预检为独立受跟踪 process group，已授权 keep-alive 会在空闲显存 gate **之前**按精确 PID 暂停 | 4 条真实视频预检通过，写 `preflight_complete.json`（`torchrun_started=false`）；在 decoder 阶段向唯一 launcher 发送 TERM 的测试确认 process group/worker 全部退出、无 GPU 残留 |
 
 全量预检会消耗 CPU/存储时间（16 worker 的 32 条抽样约一分钟，且样本并不代表全量）。它会每 30 秒显示吞吐和 ETA；这是正式安全 full 的前置阶段，不能为了省时在正式结果中悄悄跳过。若有 rejected record，输出必须称为“数据质量过滤后的降级复现”，并保留 manifest/rejections SHA；0 条通过或 worker crash 不是可继续训练的过滤结果，而是带证据的失败。
@@ -157,7 +159,7 @@ export DATA_ROOT=<DATA_ROOT>
 # 默认 NFRAMES=8；如覆写，必须是 >=2 的偶数。
 ```
 
-第一步只做 checkpoint-500 的受控诊断恢复（**不设置** `ALLOW_PAUSE_EXTERNAL_KEEPALIVE`，除非已按第 7 节显式配置）。它必须沿用下面指定的旧 path-verified JSON，关闭 decoder filtering；历史输入全为 video，因此终端会确认使用父类 `RandomSampler`。`MAX_STEPS=540` 只比旧 checkpoint 多跑约 40 个 global step，用于跨越旧故障点，不得作为正式结果：
+第一步只做 checkpoint-500 的受控诊断恢复（**不设置** `ALLOW_PAUSE_EXTERNAL_KEEPALIVE`，除非已按第 7 节显式配置）。它必须沿用下面指定的旧 path-verified JSON，关闭 decoder filtering；历史输入全为 video，因此终端会确认使用父类 `RandomSampler`。phase 2 会先静态核验 4 个 optimizer shard 只含受限 allowlist，并通过同一 DeepSpeed loader 读一个小 model-state probe；无需设置不安全的 `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`。`MAX_STEPS=540` 只比旧 checkpoint 多跑约 40 个 global step，用于跨越旧故障点，不得作为正式结果：
 
 ```bash
 cd <REPO_ROOT>
@@ -274,4 +276,4 @@ bash <KEEPALIVE_LAUNCHER>
 
 full 默认关闭逐 token JSONL，避免 116,248 条视频训练产生无界的证据文件；smoke 已经提供了三类 CoT token 的可读样例。若确实要检查 full 中的 token，需要先把 `MAX_STEPS` 设成有限值，再明确设 `FULL_OUTPUT_SELECTED_TOKEN=1`。path-verified 只表示路径存在且非空；decoder-verified 表示本次配置下 Qwen/torchvision preprocessing 已通过。若有 rejection，必须使用 manifest/rejections SHA 追踪最终训练语料，不得把它描述为原始全量数据的严格复现。
 
-还未完成的是修复后 checkpoint-500 诊断恢复、正式 full epoch 的实际耗时、长程稳定性、paired baseline/KTR 对比和最终任务指标；这些必须以后续真实 run 的落盘数据为准。旧 active full 已失败结束，缺少启动时自动 provenance，仅保留为故障/资源观察证据。若新 full 因容量门禁、视频解码或训练错误退出，保留 `terminal.log`/`training.log`/`torchrun-logs`/`rank_trace`/`nccl`/`training_summary.md`，再分析，而不是直接切到 B200 或改变算法配置。
+还未完成的是 checkpoint-500 跨越旧 step-529 的诊断、正式 full epoch 的实际耗时、长程稳定性、paired baseline/KTR 对比和最终任务指标；这些必须以后续真实 run 的落盘数据为准。旧 active full 已失败结束，缺少启动时自动 provenance，仅保留为故障/资源观察证据。若新 full 因容量门禁、视频解码或训练错误退出，保留 `terminal.log`/`training.log`/`torchrun-logs`/`rank_trace`/`nccl`/`training_summary.md`，再分析，而不是直接切到 B200 或改变算法配置。
