@@ -534,7 +534,10 @@ class Qwen2VLGRPOTrainer(Trainer):
             
             # Hack For Qwen-2.5-VL
             img_id = model.config.get('image_token_id', 151655)
-            vid_id = model.config.get('image_token_id', 151656)
+            # Image and video placeholders are distinct Qwen token IDs.  Do
+            # not reuse the image key here: doing so leaves video placeholders
+            # unmasked in this legacy Video-KTR trainer path.
+            vid_id = model.config.get('video_token_id', 151656)
 
             vis_pos = (prompt_completion_ids == img_id) | (prompt_completion_ids == vid_id)
             masked_inputs["attention_mask"][vis_pos] = 0

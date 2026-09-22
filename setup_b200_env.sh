@@ -190,10 +190,7 @@ else
     log "reusing existing isolated venv: ${venv_dir}"
 fi
 
-"${venv_python}" -m pip --version >/dev/null 2>&1 \
-    || die "pip is unavailable in ${venv_python}; do not install into the platform Python"
-
-venv_site="$("${venv_python}" - <<'PY'
+venv_site="$("${venv_python}" -S - <<'PY'
 import site
 paths = site.getsitepackages()
 if not paths:
@@ -202,6 +199,14 @@ print(paths[0])
 PY
 )"
 [[ -d "${venv_site}" ]] || die "venv site-packages directory is unavailable: ${venv_site}"
+
+# Repair the old early-sorting compatibility hook before invoking this venv
+# again.  ``-S`` above deliberately avoids executing .pth files while we find
+# the exact venv site directory.
+legacy_distutils_pth_file="${venv_site}/video_ktr_distutils_compat.pth"
+rm -f "${legacy_distutils_pth_file}"
+"${venv_python}" -m pip --version >/dev/null 2>&1 \
+    || die "pip is unavailable in ${venv_python}; do not install into the platform Python"
 
 # A base interpreter can create a venv from a different Python prefix.  Add
 # only the selected CUDA-ready platform's own site directories after the venv
@@ -249,6 +254,12 @@ specification = (
     ("torchvision", "torchvision"),
     ("flash_attn", "flash-attn"),
     ("flash_attn_2_cuda", "flash-attn"),
+    # FlashAttention's rotary path imports Triton at model-import time.  The
+    # NGC B200 image supplies the CUDA-matched ``pytorch-triton`` build beside
+    # FA2; expose it through the same narrow bridge rather than fetching an
+    # arbitrary PyPI Triton wheel into the isolated venv.
+    ("triton", "pytorch-triton"),
+    ("triton_kernels", "triton_kernels"),
 )
 seen: set[Path] = set()
 for module_name, distribution_name in specification:
@@ -298,10 +309,15 @@ mv -f "${platform_pth_tmp}" "${platform_pth_file}"
 # its local shim.  A .pth import runs before torchrun/DeepSpeed imports in
 # every worker, and the explicit mode avoids accidentally preferring a removed
 # stdlib copy.
-distutils_pth_file="${venv_site}/video_ktr_distutils_compat.pth"
+# ``.pth`` files are processed lexically.  This must sort *after* the
+# platform-runtime entry above: the selected B200 image supplies setuptools,
+# and importing it earlier emits a startup error before that path is visible.
+# Remove the older name on rerun so an existing venv is repaired in place.
+distutils_pth_file="${venv_site}/zz_video_ktr_distutils_compat.pth"
 distutils_pth_tmp="${distutils_pth_file}.tmp.$$"
-printf '%s\n' 'import setuptools' > "${distutils_pth_tmp}"
+printf '%s\n' 'import os; os.environ.setdefault("SETUPTOOLS_USE_DISTUTILS", "local"); import setuptools' > "${distutils_pth_tmp}"
 mv -f "${distutils_pth_tmp}" "${distutils_pth_file}"
+rm -f "${legacy_distutils_pth_file}"
 
 mkdir -p "${b200_root}/.pip-cache" "${b200_root}/.pip-tmp" "$(dirname "${manifest_path}")"
 export PIP_CACHE_DIR="${b200_root}/.pip-cache"
@@ -355,6 +371,8 @@ roots = (
     "torch",
     "torchvision",
     "flash-attn",
+    "pytorch-triton",
+    "triton_kernels",
 )
 environment = default_environment()
 environment["extra"] = ""
@@ -426,6 +444,8 @@ import tokenizers
 import torch
 import torchvision
 import transformers
+import triton
+import triton_kernels
 import trl
 import qwen_vl_utils
 from transformers import Qwen2_5_VLForConditionalGeneration
@@ -451,6 +471,9 @@ expected = {
     "accelerate": "1.3.0",
     "peft": "0.14.0",
     "huggingface_hub": "0.34.4",
+    "triton": "3.6.0",
+    "pytorch_triton": "3.6.0+git9844da95.nv26.2",
+    "triton_kernels": "1.0.0+git9844da95.nv26.2",
 }
 observed = {
     "transformers": transformers.__version__,
@@ -462,6 +485,9 @@ observed = {
     "accelerate": accelerate.__version__,
     "peft": peft.__version__,
     "huggingface_hub": huggingface_hub.__version__,
+    "triton": triton.__version__,
+    "pytorch_triton": metadata.version("pytorch-triton"),
+    "triton_kernels": metadata.version("triton_kernels"),
 }
 for name, version in expected.items():
     if observed[name] != version:
@@ -477,7 +503,7 @@ if str(platform_bridge) not in sys.path:
     raise SystemExit(f"platform CUDA runtime bridge is absent from sys.path: {platform_bridge}")
 if any(path.startswith("/usr/local/lib/python") and path.endswith("dist-packages") for path in sys.path):
     raise SystemExit("unexpected global /usr/local site-packages leaked into the isolated venv")
-for package, module in (("torch", torch), ("torchvision", torchvision), ("flash_attn", flash_attn)):
+for package, module in (("torch", torch), ("torchvision", torchvision), ("flash_attn", flash_attn), ("triton", triton), ("triton_kernels", triton_kernels)):
     if starts_under(module.__file__, venv_dir):
         raise SystemExit(
             f"{package} must resolve from the selected B200 platform runtime bridge, not the venv: {module.__file__}"
@@ -584,11 +610,22 @@ payload = {
         "extension": str(extension),
         "sm_100_validation": fa2_proofs,
     },
+    "triton": {
+        "version": triton.__version__,
+        "distribution": metadata.version("pytorch-triton"),
+        "file": triton.__file__,
+    },
+    "triton_kernels": {
+        "distribution": metadata.version("triton_kernels"),
+        "file": triton_kernels.__file__,
+    },
     "module_files": {
         "transformers": transformers.__file__,
         "tokenizers": tokenizers.__file__,
         "av": av.__file__,
         "huggingface_hub": huggingface_hub.__file__,
+        "triton": triton.__file__,
+        "triton_kernels": triton_kernels.__file__,
         "qwen_vl_utils": qwen_vl_utils.__file__,
     },
     "cuda": cuda,

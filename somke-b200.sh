@@ -340,12 +340,15 @@ export MODEL_PATH="${model_path}"
 log "phase 2/6: checking pinned imports, FlashAttention-2 availability, and distinct Qwen media IDs"
 "${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
 import os
+from importlib import metadata
 from pathlib import Path
 
 import flash_attn
 import torch
 import tokenizers
 import transformers
+import triton
+import triton_kernels
 import trl
 from transformers import AutoConfig
 
@@ -353,11 +356,17 @@ expected = {
     "transformers": "4.49.0.dev0",
     "tokenizers": "0.21.4",
     "trl": "0.16.0",
+    "triton": "3.6.0",
+    "pytorch_triton": "3.6.0+git9844da95.nv26.2",
+    "triton_kernels": "1.0.0+git9844da95.nv26.2",
 }
 observed = {
     "transformers": transformers.__version__,
     "tokenizers": tokenizers.__version__,
     "trl": trl.__version__,
+    "triton": triton.__version__,
+    "pytorch_triton": metadata.version("pytorch-triton"),
+    "triton_kernels": metadata.version("triton_kernels"),
 }
 if observed != expected:
     raise SystemExit(f"pinned package mismatch: {observed!r} != {expected!r}")
@@ -423,7 +432,26 @@ KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" stop 2>&1 | tee -a "${run_ro
 wait_for_keepalive_count 0 "pause"
 wait_for_gpu_quiescence "after keep-alive pause"
 
-log "phase 5/6: launching real-time 8xB200 baseline and Video-KTR optimizer-step smoke"
+log "phase 5/7: executing tiny FA2 + Triton rotary forward/backward on B200 before distributed training"
+"${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
+import torch
+from flash_attn import flash_attn_func
+from flash_attn.layers.rotary import apply_rotary
+
+device = "cuda:0"
+q = torch.randn((1, 16, 2, 64), device=device, dtype=torch.bfloat16, requires_grad=True)
+k = torch.randn_like(q, requires_grad=True)
+v = torch.randn_like(q, requires_grad=True)
+attention = flash_attn_func(q, k, v, causal=False)
+cos = torch.randn((16, 32), device=device, dtype=torch.bfloat16)
+sin = torch.randn_like(cos)
+rotary = apply_rotary(q, cos, sin, interleaved=False, inplace=False)
+(attention.float().square().mean() + rotary.float().square().mean()).backward()
+torch.cuda.synchronize(0)
+print("[b200-preflight] fa2_and_triton_rotary_forward_backward=ok", flush=True)
+PY
+
+log "phase 6/7: launching real-time 8xB200 baseline and Video-KTR optimizer-step smoke"
 export PYTHON_BIN="${python_bin}"
 export GRPO_SITE_PACKAGES="${site_dir}"
 export MODEL_PATH="${model_path}"
@@ -478,4 +506,4 @@ if (( delegated_status != 0 )); then
     exit "${delegated_status}"
 fi
 
-log "phase 6/6: smoke passed; the EXIT handler will now restore keep-alive and verify it"
+log "phase 7/7: smoke passed; the EXIT handler will now restore keep-alive and verify it"
