@@ -367,6 +367,28 @@ if ! printf '#include <cuda.h>\n' | gcc -I"${triton_cuda_include_dir}" -x c -E -
 fi
 export C_INCLUDE_PATH="${triton_cuda_include_dir}${C_INCLUDE_PATH:+:${C_INCLUDE_PATH}}"
 export CPLUS_INCLUDE_PATH="${triton_cuda_include_dir}${CPLUS_INCLUDE_PATH:+:${CPLUS_INCLUDE_PATH}}"
+triton_ptxas_path="${TRITON_PTXAS_PATH:-}"
+if [[ -z "${triton_ptxas_path}" ]]; then
+    for candidate in "${CUDA_HOME:+${CUDA_HOME}/bin/ptxas}" /usr/local/cuda/bin/ptxas; do
+        if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+            triton_ptxas_path="${candidate}"
+            break
+        fi
+    done
+fi
+if [[ -z "${triton_ptxas_path}" || ! -x "${triton_ptxas_path}" ]]; then
+    log "ERROR: Triton needs an executable ptxas; set TRITON_PTXAS_PATH"
+    exit 2
+fi
+triton_ptxas_path="$(realpath -e "${triton_ptxas_path}")"
+if ! "${triton_ptxas_path}" --version | grep -Eq 'release [0-9]+\.[0-9]+'; then
+    log "ERROR: selected ptxas does not report a usable CUDA release: ${triton_ptxas_path}"
+    exit 2
+fi
+# Triton 3.6 only searches its bundled tool directory unless this knob is set;
+# it deliberately does not fall back to PATH.  Keep the selected image's
+# matching ptxas explicit and record it in the run profile.
+export TRITON_PTXAS_PATH="${triton_ptxas_path}"
 triton_tmpdir="${B200_TRITON_TMPDIR:-${b200_root}/.triton-tmp}"
 triton_cache_dir="${B200_TRITON_CACHE_DIR:-${b200_root}/.triton-cache}"
 for triton_path in "${triton_tmpdir}" "${triton_cache_dir}"; do
@@ -381,7 +403,7 @@ for triton_path in "${triton_tmpdir}" "${triton_cache_dir}"; do
 done
 export TMPDIR="${triton_tmpdir}"
 export TRITON_CACHE_DIR="${triton_cache_dir}"
-log "Triton JIT preflight: cuda_headers=${triton_cuda_include_dir}; cache=${triton_cache_dir}; temp=${triton_tmpdir}"
+log "Triton JIT preflight: cuda_headers=${triton_cuda_include_dir}; ptxas=${triton_ptxas_path}; cache=${triton_cache_dir}; temp=${triton_tmpdir}"
 log "phase 2/7: checking pinned imports, FlashAttention-2 availability, and distinct Qwen media IDs"
 "${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
 import os
@@ -459,7 +481,7 @@ log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
     printf 'b200_root=%s\nmodel_path=%s\ndata_root=%s\ndataset_source=%s\n' "${b200_root}" "${model_path}" "${data_root}" "${dataset_source}"
     printf 'holmes_requested=Holmes-16k\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\nmax_pixels=401408\nnframes=16\n'
     printf 'attn_implementation=flash_attention_2\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\ntemporal_permutations=1\ntemporal_include_reverse=false\n'
-    printf 'triton_cuda_include_dir=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_cache_dir}" "${triton_tmpdir}"
+    printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
     printf 'image_video_token_ids=distinct\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
     printf 'wrapper_sha256=%s\n' "$(sha256sum "${project_root}/somke-b200.sh" | awk '{print $1}')"
     printf 'delegate_sha256=%s\n' "$(sha256sum "${project_root}/smoke.sh" | awk '{print $1}')"
