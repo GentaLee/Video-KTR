@@ -22,14 +22,14 @@ baseline：全部有效 completion token 进入 GRPO + KL
 KTR：仅 U 中 token 进入 GRPO policy + KL
 ```
 
-`E`、`V`、`T` 是由分数与反事实变化选出的 mask，并非 token 的人工语义类别；一个 token 可以同时属于多个集合。实现已分别读取 `image_token_id` 和 `video_token_id`，不再把视频 token 当作图像 token 处理。
+`E`、`V`、`T` 是由分数与反事实变化选出的 mask，并非 token 的人工语义类别；一个 token 可以同时属于多个集合。E/V 对每条 completion 均精确 top 20%；视频 completion 的 T 也精确 top 20%，而图像 completion 的 T 因没有帧序而设计为全零 mask。实现已分别读取 `image_token_id` 和 `video_token_id`，不再把视频 token 当作图像 token 处理。
 
 ## 对齐配置
 
 | 项目 | 当前 B200 配置 | 状态 |
 | --- | --- | --- |
 | 计算资源 | 集群 3，8×B200、8 ranks | 已通过 paired smoke |
-| 模型 / 数据请求 | Qwen2.5-VL-7B-COT-SFT / Holmes-16k | 模型已校验；数据见下文 |
+| 模型 / 数据请求 | Qwen2.5-VL-7B-COT-SFT / Holmes-16k | 可信 exact-revision manifest + runtime hash gate 是 full 前置；本机重哈希只以落盘 gate 证据为准；数据见下文 |
 | 最大 prompt / completion | 16,384 / 768 | 对齐原始 launcher |
 | 生成数 | G=8 | 对齐 |
 | Attention | FlashAttention-2（原生 B200 架构；Qwen rotary dtype 兼容 shim） | 已做真实前反向验证 |

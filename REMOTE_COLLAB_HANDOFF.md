@@ -62,7 +62,7 @@ ARTIFACTS: <run-root>/terminal.log；<run-root>/training.log；<run-root>/gpu_me
 RISK / ROLLBACK: 当前请求 G=8/FA2；若数据为 reduced-media-subset，不能称严格 Holmes-16k；不要重复启动训练。
 LAST_VERIFIED: <last smoke>；exit=0；<相对 artifact>/training_complete.json
 RUNNING: <run-root>；最近 step=<step>；下次检查=下一个 heartbeat 或错误关键词出现时。
-RECOVERY: bash <KEEPALIVE_LAUNCHER>（仅已确认训练停止且自动恢复失败时）
+RECOVERY: KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start（仅已确认训练停止且自动恢复失败时）
 FIRST_COMMAND: tail -n 40 <run-root>/terminal.log
 NEXT: 接收者只读检查上述三类证据，并回传新的 KT-HANDOFF/v1 记录。
 ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
@@ -94,7 +94,7 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 | 类别 | 已验证版本/身份 | 用途 |
 | --- | --- | --- |
 | 模型 | `Video-R1/Qwen2.5-VL-7B-COT-SFT`，Qwen2.5-VL，BF16，8.29B 参数 | policy 与 reference 的基座 checkpoint |
-| 模型完整性 | 官方 revision `f71f0f1e22c015007fccd080eef87824fe292a10`；4 个 safetensors weight shard SHA-256 全部匹配 | 已核对权重 shards；未独立核对 config/index/processor manifest |
+| 模型身份（集群 3 target gate） | checked-in 的 exact-revision `manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json` 覆盖模型目录全部顶层常规文件（含 config、index、weight shard、tokenizer/processor），runtime gate 逐项重算 | full 必须 fail-closed；在 `runtime_gate.json` 实际落盘前，不宣称本机已独立重哈希。本地 verified-copy 只能用于独立比较/恢复，不能替代该锚；旧“4 shard 匹配”仅为无机器可读证据的历史说法 |
 | Transformers | `4.49.0.dev0` | 与 checkpoint 所需 Qwen2.5-VL 路径兼容 |
 | tokenizers / TRL / DeepSpeed | `0.21.4` / `0.16.0` / `0.15.4` | project-local overlay，避免污染系统环境 |
 | 离线安装资产 | GRPO runtime wheelhouse + checkpoint-compatible wheelhouse | 两者都不随 Git 提交；当前 bundle 对基础镜像仍有显式依赖，不能把它称为 clean-Python 完整闭包 |
@@ -114,7 +114,9 @@ ASK: 是否为了严格上游配置另行准备 8-GPU/FA2 profile。
 
 在 GPU 节点上执行 `setup_grpo_env.sh` 前，应先按第 0 节格式报告这些资产的位置类别与版本；脚本会拒绝缺失的 wheelhouse、关键 wheel 或上述基础镜像 import，不会联网下载，也不会写入系统 Python。**已知妥协与降级边界：**当前 wheelhouses 并非 clean-Python 的完整 transitive closure，当前脚本也没有“完整辅助 bundle → full overlay”的安装路径。因此 clean-Python 重建在本版本**不受支持**；不能只准备一个 bundle 后绕过 gate，更不能让 GPU 节点联网补包。该降级路径需先补齐完整、版本锁定的 bundle，扩展并验证 `setup_grpo_env.sh` 的 full-overlay 安装模式后才能启用；目前应使用已验证的 GPU image。`smoke.sh`、`run_full.sh` 与非 GRPO selector 都没有私有路径默认值，必须显式提供 `MODEL_PATH` 和（适用时）`DATA_ROOT`；selector 可用 `SITE_PACKAGES` 覆盖默认的 GRPO overlay。
 
-### 最小可执行阶梯（新 run；不触碰当前 active run）
+### 历史集群 2 / H200 最小可执行阶梯（归档；不得在集群 3 执行）
+
+> **归档警告：以下仅是集群 2 / H200 故障定位记录，禁止复制到集群 3。** 集群 3 只能使用第 10 节的 `run_full_b200.sh`，并采用该节的保活语法与数据门禁。
 
 以下命令只使用占位符，且每次 `RUN_ROOT` 都必须是尚不存在的新目录。旧探索性 full 已失败结束；checkpoint-500→501 的恢复 smoke 已通过，下一步是跨越旧 step-529 的诊断，再由其结果决定是否启动新的 full。
 
@@ -128,6 +130,7 @@ export DATA_ROOT=<DATA_ROOT>
 ./setup_grpo_env.sh
 VARIANT=both ./smoke.sh
 
+# [历史 H200 ONLY；不得在集群 3 执行]
 # 仅在修复后 paired smoke 通过后；没有外部保活时不要设置 ALLOW_*。
 # 仅定位/回归：保留旧 manifest 顺序，跨越旧故障点；不要将其当作正式结果。
 # launcher 会 scoped allowlist 两个已核验 DeepSpeed 类；不要设置 TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD。
@@ -144,7 +147,7 @@ NCCL_DIAGNOSTICS=1 RANK_PHASE_TRACE=1 \
 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-decoder-verified-<UTC> ./run_full.sh
 ```
 
-若节点确有外部保活，额外显式配置其两个身份并取得暂停授权后才运行对应命令：
+若节点确有外部保活，额外显式配置其两个身份并取得暂停授权后才运行对应命令（**历史 H200 模板；不适用于集群 3**）：
 
 ```bash
 export KEEPALIVE_MAIN=<KEEPALIVE_MAIN>
@@ -344,7 +347,7 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 
 ## 9. 历史 H200 复现结论（归档）
 
-1. 模型的 4 个 weight shards 已与官方 LFS SHA-256 元数据逐一匹配；config/index/processor manifest 未在本轮独立核对，因此不能据此排除全部模型相关偏差。
+1. 历史记录曾称 4 个 weight shards 与官方 LFS SHA-256 元数据匹配，但缺少当前机器可读的 manifest/output，不能作为集群 3 的模型身份结论。active B200 full 必须使用可信 exact-revision manifest 覆盖所有顶层常规文件，并由 runtime gate 重新核验后才可启动。
 2. 当前实现已真实验证 E/V/T 选择、union policy+KL、optimizer 更新、资源遥测与 CoT token 证据；修复后需重跑 paired smoke 才能给出公平的 baseline/KTR 数值比较。
 3. 旧探索性 full 已在约 step 529 因 rank 间 collective timeout 失败；最高置信推断是 rank 0 的训练前视频预处理 stall，而不是 OOM。checkpoint-500→501 的恢复已在 scoped safe-global 修复后通过，新增 decoder isolation、rank trace 和 NCCL flight recorder 后，仍须由新的短恢复跨越 step 529 实际回归验证。
 4. 后续正式 full 会有源码/数据 manifest provenance，且它**不是**上游 8-rank、G=8、16k/768、401k pixels、FlashAttention2 launcher 的严格逐参数复现。要求严格上游对齐时，必须另做 8-rank/FA2/G8 profile 的容量和兼容性 smoke。
@@ -358,10 +361,10 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 | 项目 | 已验证事实 | 证据边界 |
 | --- | --- | --- |
 | 硬件与 runtime | 集群 3，8×B200，隔离 Python 3.12 venv，CUDA 13.1；FA2 binary 含 `sm_100` | 最终 smoke 真实执行 FA2/Qwen rotary 前反向；full epoch 未运行 |
-| 模型 | Qwen2.5-VL-7B-COT-SFT；4 个 safetensors weight shard SHA-256 已匹配 | 不把未单独重算的辅助文件伪称为独立 hash 验证 |
-| paired smoke | baseline/KTR 各 1 optimizer step，8 ranks；外层 94.840 / 95.008 s；跨卡最大显存 47,858 / 45,870 MiB | 单步容量/链路证据，不是完整 epoch 或收敛结论 |
-| selector | `paper/per_completion`、精确 top-20%、absolute delta、每 rank/step 一个非恒等置换、不含 reverse | 不等于全局所有 rank 共用同一置换 |
-| 媒体 token | `image_token_id != video_token_id`，visual positions 取两者并集 | smoke 是 8 条视频；mixed sampler 的训练覆盖留给 full |
+| 模型 | Qwen2.5-VL-7B-COT-SFT；checked-in exact-revision manifest 覆盖 config/index/weight shard/tokenizer/processor 等全部顶层常规文件，runtime gate 逐项重算 | gate 是 full 的必需契约；gate artifact 未生成前，不宣称当前机器独立 hash 已通过 |
+| paired smoke | 8 条固定**视频**，baseline/KTR 各 1 optimizer step、8 ranks；外层 94.840 / 95.008 s；跨卡最大显存 47,858 / 45,870 MiB | 单步 video V/T 容量/链路证据；不是 image 或 mixed-modality 分布式 sampler 覆盖，更不是完整 epoch/收敛结论 |
+| selector | `paper/per_completion`、E/V 对每条 completion 精确 top-20%；视频 completion 的 T 也精确 top-20%；absolute delta、每 rank/step 一个非恒等置换、不含 reverse | image completion 的 T 是设计上全零 mask（无帧序）；不等于全局所有 rank 共用同一置换 |
+| 媒体 token | `image_token_id != video_token_id`，visual positions 取两者并集 | ID 分离由启动 preflight 覆盖；真实 mixed sampler 训练覆盖留给 full |
 | Qwen FA2 兼容 | 仅在 pinned legacy Transformers + FA2 下启用上游等价 rotary dtype shim | 解析 attention 非 FA2 或 shim gate 失败即拒绝，不降到 SDPA |
 
 最终 smoke 记录的 CoT token 数为 E=341、V=592、T=472、union records=768（类别可重叠）；例子包括 E 的 ` step`/` First`、V 的 ` step`/`'ll`、T 的 ` by`/` First`。它们由分数归因选中，不是人工词性分类。
@@ -382,6 +385,13 @@ ALLOW_PAUSE_EXTERNAL_KEEPALIVE=1 VARIANT=ktr RUN_ROOT=<ARTIFACT_ROOT>/ktr-<UTC> 
 ### 数据门禁与手动命令
 
 当前数据状态：16,916 条 source（8,765 image + 8,151 video）；路径可用 15,365 条（8,765 image + 6,600 video），缺失 1,551 video/233 个唯一媒体路径。
+
+### 补齐 strict Holmes-16k 的匿名步骤
+
+1. 以原始 16,916 条 source manifest 为唯一清单，从已获授权的数据源或共享交付补齐 233 个缺失的**相对媒体路径**；保留原目录结构，不改写标注，也不把媒体落到临时目录。
+2. 在 `<共享持久卷>` 中重新执行 B200 launcher 的 path gate，核对总数 `16,916`、图像 `8,765`、视频 `8,151`，并保存新的 path manifest 与 SHA-256。
+3. 以当前训练同一 Qwen/torchvision 配置做 mixed image/video decode preflight（`nframes=8`、CLI `max_pixels=401408`），保留 accepted dataset、manifest 和全部 rejection 证据。
+4. 只有总数完整且 decode `0 rejection` 时，才可不带任何 reduced/filter opt-in 启动 strict full；否则继续使用明确标记的 reduced/filtered 路径。补齐、gate 与结论必须按第 0 节发一条新的 `KT-HANDOFF/v1` 记录。
 
 ```bash
 # strict：仅在补齐为 16,916 且 mixed decoder 无 rejection 后通过
@@ -406,3 +416,29 @@ KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start
 ```
 
 当前 `RUNNING` 状态：无本项目 B200 full training；保活应为运行状态。下一位执行者先按第 0 节模板做只读确认，再决定是否以 strict 或显式 reduced 路径手动启动。
+
+### 最新 active 状态记录（可直接续写）
+
+```text
+[KT-HANDOFF/v1]
+ID: 20260922-AI-001
+TIME_UTC: 2026-09-22T05:28:43Z
+FROM / TO: AI / 远程协作者
+TYPE: HANDOFF
+STATUS: PASSED
+STATE_CHANGE: 集群 3 最终 video-only B200 paired smoke 已通过；full 仍未启动。
+SCOPE: 集群 3 的 B200 环境、smoke 证据和 strict/reduced 数据门禁
+ENV: 集群 3；branch=<owner>/video-ktr-repro-handoff；commit=<当前已部署提交>；run=<共享持久卷>/video-ktr-b200/artifacts/grpo-smoke-b200/<UTC>
+CLAIM: 8×B200 的 FA2、Qwen rotary、视频 E/V/T/union 与一次真实优化步已验证；不能据此宣称 mixed sampler 或 full epoch 已验证。
+EVIDENCE: somke-b200.sh exit=0；baseline/KTR 外层 94.840/95.008 s；跨已监控 GPU 最大显存 47858/45870 MiB；training process=0；保活恢复为唯一实例。
+CHANGES: 本分支已准备 B200 环境/launcher/文档；本记录不代表启动或部署 full。
+EXECUTED: 最终 somke-b200.sh；未执行 run_full_b200.sh。
+ARTIFACTS: <共享持久卷>/video-ktr-b200/artifacts/grpo-smoke-b200/<UTC>/
+RISK / ROLLBACK: 当前仅 15365/16916，默认 strict gate 必须拒绝；显式 reduced 才可运行且不得称严格 Holmes-16k。遇到保活恢复失败，先确认全部 rank 退出。
+LAST_VERIFIED: smoke exit=0；FA2 解析 gate、token report、资源对比、训练进程清理和保活唯一实例检查均通过。
+RUNNING: 无 B200 full training；保活应在运行；下次检查条件=操作者决定 strict 或 reduced 手动启动前。
+RECOVERY: KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start（仅自动恢复失败且确认 torchrun/rank 已退出时）。
+FIRST_COMMAND: cd <REPO_ROOT> && git status --short
+NEXT: 操作者补齐媒体后复验 strict gate，或显式选择 reduced 路径手动启动单个变体；baseline/KTR 必须串行。
+ASK: NONE
+```

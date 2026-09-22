@@ -23,7 +23,8 @@ for name in \
     B200_ROOT B200_ENV_FILE B200_RUN_ROOT RUN_ROOT PYTHON_BIN B200_MODEL_PATH B200_DATA_ROOT \
     B200_DATASET_SOURCE B200_KEEPALIVE_MAIN B200_KEEPALIVE_LAUNCHER \
     B200_ALLOW_PAUSE_KEEPALIVE B200_ALLOW_REDUCED_HOLMES \
-    B200_ALLOW_DECODER_FILTERED B200_SMOKE_RUN_ROOT; do
+    B200_ALLOW_DECODER_FILTERED B200_SMOKE_RUN_ROOT B200_ENV_MANIFEST \
+    B200_MODEL_INTEGRITY_MANIFEST B200_MODEL_SHA256_MANIFEST; do
     if [[ -v "${name}" ]]; then
         explicit_b200_names+=("${name}")
         explicit_b200_values+=("${!name}")
@@ -47,6 +48,8 @@ model_path="${B200_MODEL_PATH:-${b200_root}/model/Qwen2.5-VL-7B-COT-SFT}"
 data_root="${B200_DATA_ROOT:-${b200_root}/data}"
 dataset_source="${B200_DATASET_SOURCE:-${data_root}/Video-R1-Holmes-16k.json}"
 smoke_root="${B200_SMOKE_RUN_ROOT:-${b200_root}/artifacts/grpo-smoke-b200/20260922T044249Z}"
+environment_manifest="${B200_ENV_MANIFEST:-${b200_root}/environment-manifest.json}"
+model_integrity_manifest="${B200_MODEL_INTEGRITY_MANIFEST:-${B200_MODEL_SHA256_MANIFEST:-${project_root}/manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json}}"
 keepalive_main="${B200_KEEPALIVE_MAIN:-}"
 keepalive_launcher="${B200_KEEPALIVE_LAUNCHER:-}"
 allow_pause="${B200_ALLOW_PAUSE_KEEPALIVE:-0}"
@@ -82,6 +85,9 @@ path_manifest="${path_dataset}.manifest.json"
 decoder_dataset="${run_root}/Holmes-16k-media-decoder-verified.json"
 decoder_manifest="${decoder_dataset}.manifest.json"
 smoke_gate="${run_root}/smoke_gate.json"
+smoke_gate_pre_gpu="${run_root}/smoke_gate_pre_gpu.json"
+runtime_gate="${run_root}/runtime_gate.json"
+runtime_gate_pre_gpu="${run_root}/runtime_gate_pre_gpu.json"
 path_gate="${run_root}/data_path_gate.json"
 data_gate="${run_root}/data_gate.json"
 
@@ -108,6 +114,10 @@ is_ephemeral_path() {
 
 if [[ "${b200_root}" != /* || "${run_root}" != /* ]] || is_ephemeral_path "${b200_root}" || is_ephemeral_path "${run_root}"; then
     printf '[b200-full] ERROR: B200_ROOT and RUN_ROOT must use durable storage, not /tmp or /mnt\n' >&2
+    exit 2
+fi
+if [[ "${environment_manifest}" != /* || "${model_integrity_manifest}" != /* ]]; then
+    printf '[b200-full] ERROR: B200 environment/model integrity manifests must be absolute paths\n' >&2
     exit 2
 fi
 if [[ -e "${run_root}" ]]; then
@@ -347,6 +357,8 @@ write_source_provenance() {
             "${project_root}/run_full_b200.sh" \
             "${project_root}/src/grpo_validate_b200_smoke.py" \
             "${project_root}/src/grpo_validate_b200_dataset.py" \
+            "${project_root}/src/grpo_validate_b200_runtime.py" \
+            "${project_root}/src/grpo_write_model_sha256_manifest.py" \
             "${project_root}/src/grpo_prepare_dataset.py" \
             "${project_root}/src/grpo_verify_media_decode.py" \
             "${project_root}/src/r1-v/src/open_r1/grpo.py" \
@@ -358,7 +370,13 @@ write_source_provenance() {
             relative_path="${source_path#${project_root}/}"
             printf 'source_sha256[%s]=%s\n' "${relative_path}" "$(sha256sum "${source_path}" | awk '{print $1}')"
         done
+        printf 'model_integrity_manifest=%s\n' "${model_integrity_manifest}"
+        printf 'model_integrity_manifest_sha256=%s\n' "$(sha256sum "${model_integrity_manifest}" | awk '{print $1}')"
+        printf 'environment_manifest=%s\n' "${environment_manifest}"
+        printf 'environment_manifest_sha256=%s\n' "$(sha256sum "${environment_manifest}" | awk '{print $1}')"
         "${python_bin}" - <<'PY'
+import av
+import deepspeed
 import flash_attn
 import torch
 import tokenizers
@@ -366,10 +384,14 @@ import transformers
 import triton
 import triton_kernels
 import trl
+import torchvision
 
 print(f"python_runtime={__import__('sys').version.split()[0]}")
 print(f"torch={torch.__version__}")
 print(f"cuda={torch.version.cuda}")
+print(f"torchvision={torchvision.__version__}")
+print(f"av={av.__version__}")
+print(f"deepspeed={deepspeed.__version__}")
 print(f"flash_attn={flash_attn.__version__}")
 print(f"transformers={transformers.__version__}")
 print(f"tokenizers={tokenizers.__version__}")
@@ -595,10 +617,10 @@ if [[ -z "${keepalive_main}" || -z "${keepalive_launcher}" ]]; then
     log "ERROR: configure B200_KEEPALIVE_MAIN and B200_KEEPALIVE_LAUNCHER in ${env_file} or the environment"
     exit 2
 fi
-for path in "${python_bin}" "${model_path}" "${data_root}" "${dataset_source}" "${smoke_root}" "${keepalive_main}" "${keepalive_launcher}"; do
+for path in "${python_bin}" "${model_path}" "${data_root}" "${dataset_source}" "${smoke_root}" "${environment_manifest}" "${model_integrity_manifest}" "${keepalive_main}" "${keepalive_launcher}"; do
     require_path "required B200 input" "${path}"
 done
-for path in "${model_path}" "${data_root}" "${dataset_source}" "${smoke_root}"; do
+for path in "${model_path}" "${data_root}" "${dataset_source}" "${smoke_root}" "${environment_manifest}" "${model_integrity_manifest}"; do
     if is_ephemeral_path "$(realpath -e "${path}")"; then
         log "ERROR: required input must not resolve under /tmp or /mnt: ${path}"
         exit 2
@@ -683,7 +705,15 @@ done
 export TMPDIR="${triton_tmpdir}"
 export TRITON_CACHE_DIR="${triton_cache_dir}"
 
-log "phase 2/8: checking pinned imports, FA2 sm_100 binary, and separate image/video token IDs"
+log "phase 2/8: hashing the pinned model, checking environment drift, FA2 sm_100 binary, and separate image/video token IDs"
+run_logged_preflight "B200 pinned model/environment integrity gate" \
+    env CUDA_VISIBLE_DEVICES="" \
+    "${python_bin}" -u "${project_root}/src/grpo_validate_b200_runtime.py" \
+    --model-path "${model_path}" \
+    --model-integrity-manifest "${model_integrity_manifest}" \
+    --environment-manifest "${environment_manifest}" \
+    --project-root "${project_root}" \
+    --output "${runtime_gate}"
 "${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
 import os
 from importlib import metadata
@@ -833,7 +863,9 @@ write_source_provenance "${run_root}/source_provenance.txt"
     printf 'profile=8xB200-upstream-aligned\nvariant=%s\nreproduction_class=%s\n' "${variant}" "${reproduction_class}"
     printf 'strict_holmes_16k=%s\ndecoder_filtered=%s\n' "$([[ "${reproduction_class}" == "strict-holmes-16k" ]] && printf true || printf false)" "${decoder_filtered}"
     printf 'dataset_source=%s\npath_dataset=%s\ntraining_dataset_json=%s\n' "${dataset_source}" "${path_dataset}" "${training_dataset_json}"
-    printf 'smoke_root=%s\nsmoke_gate=%s\ndata_gate=%s\n' "${smoke_root}" "${smoke_gate}" "${data_gate}"
+    printf 'smoke_root=%s\nsmoke_gate=%s\nsmoke_gate_pre_gpu=%s\nruntime_gate=%s\nruntime_gate_pre_gpu=%s\ndata_gate=%s\n' \
+        "${smoke_root}" "${smoke_gate}" "${smoke_gate_pre_gpu}" "${runtime_gate}" "${runtime_gate_pre_gpu}" "${data_gate}"
+    printf 'model_integrity_manifest=%s\nenvironment_manifest=%s\n' "${model_integrity_manifest}" "${environment_manifest}"
     printf 'nproc_per_node=8\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\n'
     printf 'requested_cli_max_pixels=401408\nqwen_file_video_effective_cap=105369\nobserved_smoke_video_pixels=94080-98784\nnframes=8\n'
     printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\n'
@@ -844,6 +876,24 @@ write_source_provenance "${run_root}/source_provenance.txt"
     printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
 } > "${run_root}/launch_config.txt"
 log "data class=${reproduction_class}; decoder_filtered=${decoder_filtered}; source and decoder manifests are frozen under this run root"
+
+# CPU data preparation can take substantially longer than a smoke. Recheck
+# the clean source lineage and the full model/runtime identity at the exact
+# boundary before the controller is allowed to pause the GPU keep-alive.
+log "phase 6.5/8: re-running smoke/source-clean and pinned model/environment gates immediately before GPU work"
+run_logged_preflight "B200 smoke provenance recheck before GPU pause" \
+    "${python_bin}" -u "${project_root}/src/grpo_validate_b200_smoke.py" \
+    --smoke-root "${smoke_root}" \
+    --project-root "${project_root}" \
+    --output "${smoke_gate_pre_gpu}"
+run_logged_preflight "B200 model/environment recheck before GPU pause" \
+    env CUDA_VISIBLE_DEVICES="" \
+    "${python_bin}" -u "${project_root}/src/grpo_validate_b200_runtime.py" \
+    --model-path "${model_path}" \
+    --model-integrity-manifest "${model_integrity_manifest}" \
+    --environment-manifest "${environment_manifest}" \
+    --project-root "${project_root}" \
+    --output "${runtime_gate_pre_gpu}"
 
 log "phase 7/8: pausing keep-alive only for B200 GPU work, then checking real FA2/Qwen rotary"
 if ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_ticks}"; then

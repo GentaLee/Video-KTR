@@ -53,6 +53,10 @@ allow_pause="${B200_ALLOW_PAUSE_KEEPALIVE:-0}"
 smoke_problem_ids="${B200_SMOKE_PROBLEM_IDS:-9969,10457,10648,10895,11260,11854,11999,12354}"
 
 keepalive_paused=0
+# A controller stop command may return an error after it has already stopped
+# its workload.  Keep this distinct from a confirmed pause so the EXIT trap
+# can inspect the exact process state and restore safely in either outcome.
+keepalive_stop_requested=0
 delegated_pid=""
 delegated_pgid=""
 keepalive_original_pid=""
@@ -216,6 +220,7 @@ start_keepalive() {
     if (( ${#keepalive_pids[@]} == 1 )); then
         log "keep-alive restore: already running (pid=${keepalive_pids[0]}); no duplicate started"
         keepalive_paused=0
+        keepalive_stop_requested=0
         return 0
     fi
     if (( ${#keepalive_pids[@]} > 1 )); then
@@ -226,6 +231,7 @@ start_keepalive() {
     KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" start 2>&1 | tee -a "${run_root}/keepalive.log"
     wait_for_keepalive_count 1 "restore"
     keepalive_paused=0
+    keepalive_stop_requested=0
 }
 
 cleanup() {
@@ -239,6 +245,23 @@ cleanup() {
     set +e
     if ! stop_delegated_smoke; then
         child_stopped=0
+    fi
+    # Do not equate a controller stop request with a completed pause.  The
+    # controller can fail after stopping its child, or fail before changing
+    # anything.  Reconcile the exact keep-alive main process before deciding
+    # whether restoration is necessary, so cleanup never starts a duplicate.
+    if (( keepalive_paused == 0 && keepalive_stop_requested == 1 )); then
+        find_keepalive_pids
+        if (( ${#keepalive_pids[@]} == 0 )); then
+            keepalive_paused=1
+            log "cleanup: controller stop request left no verified keep-alive process; restoration is required"
+        elif (( ${#keepalive_pids[@]} == 1 )); then
+            keepalive_stop_requested=0
+            log "cleanup: keep-alive remained active after failed stop request; no duplicate restore is needed"
+        else
+            restore_status=1
+            log "CRITICAL: keep-alive state is ambiguous after failed stop request (${keepalive_pids[*]})"
+        fi
     fi
     if (( keepalive_paused == 1 )); then
         if (( child_stopped != 1 )); then
@@ -509,9 +532,10 @@ if ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_t
     log "ERROR: keep-alive PID identity changed before official stop; refusing to manage it"
     exit 2
 fi
-keepalive_paused=1
+keepalive_stop_requested=1
 KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" stop 2>&1 | tee -a "${run_root}/keepalive.log"
 wait_for_keepalive_count 0 "pause"
+keepalive_paused=1
 wait_for_gpu_quiescence "after keep-alive pause"
 
 log "phase 5/7: executing tiny FA2 + the real Qwen rotary forward/backward on B200 before distributed training"

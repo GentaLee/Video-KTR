@@ -1,4 +1,4 @@
-"""Static contract checks for the manual B200 full launcher."""
+"""Static contract checks for the manual B200 launchers."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = (ROOT / "run_full_b200.sh").read_text(encoding="utf-8")
+SMOKE_LAUNCHER = (ROOT / "somke-b200.sh").read_text(encoding="utf-8")
 
 
 class B200FullLauncherContractTests(unittest.TestCase):
@@ -55,6 +56,26 @@ class B200FullLauncherContractTests(unittest.TestCase):
         self.assertIn("VIDEO_KTR_QWEN_FA2_ROTARY_DTYPE_COMPAT=1", LAUNCHER)
         self.assertIn("image_id == video_id", LAUNCHER)
         self.assertIn('b"sm_100"', LAUNCHER)
+
+    def test_smoke_confirms_pause_before_marking_keepalive_paused(self) -> None:
+        """A failed controller stop must be reconciled before cleanup restores."""
+        stop_request = SMOKE_LAUNCHER.index("keepalive_stop_requested=1")
+        controller_stop = SMOKE_LAUNCHER.index(
+            'bash "${keepalive_launcher}" stop', stop_request
+        )
+        pause_confirmation = SMOKE_LAUNCHER.index(
+            'wait_for_keepalive_count 0 "pause"', controller_stop
+        )
+        confirmed_pause = SMOKE_LAUNCHER.index(
+            "keepalive_paused=1", pause_confirmation
+        )
+        self.assertLess(stop_request, controller_stop)
+        self.assertLess(controller_stop, pause_confirmation)
+        self.assertLess(pause_confirmation, confirmed_pause)
+        self.assertIn(
+            "controller stop request left no verified keep-alive process",
+            SMOKE_LAUNCHER,
+        )
 
 
 if __name__ == "__main__":

@@ -12,9 +12,9 @@
 | 阶段 | 状态 | 可复查证据 / 下一步 |
 | --- | --- | --- |
 | B200 isolated venv / runtime bridge | 已验证 | pinned Transformers/TRL/DeepSpeed + B200 FA2 `sm_100` gate；CUDA headers、`ptxas` 和持久 Triton cache 已配置 |
-| 模型身份 | 已验证 | Qwen2.5-VL-7B-COT-SFT 的 4 个 safetensors weight shard SHA-256 已比对 |
-| B200 paired smoke | 已通过 | 8 ranks、prompt=16384、completion=768、G=8、FA2、8 帧；baseline 94.840 s，KTR 95.008 s |
-| selector 语义 | 已通过 | `paper/per_completion`、每 completion 精确 top-20%、absolute delta、每 rank/step 单个非恒等置换、分离 image/video token ID |
+| 模型身份 | full 前必须通过 | 可信 exact-revision manifest 覆盖全部顶层常规模型文件，并由 runtime hash gate 复核；旧“4 个 weight shard 已比对”没有当前机器可审计证据，不能当作本机重哈希结论 |
+| B200 paired smoke | 已通过 | 8 条固定**视频**、8 ranks、prompt=16384、completion=768、G=8、FA2、8 帧；baseline 94.840 s，KTR 95.008 s；不是 mixed sampler 分布式覆盖 |
+| selector 语义 | 已通过 | E/V 每 completion 精确 top-20%；视频 T 同样精确 top-20%，image T 设计为全零；absolute delta、每 rank/step 单个非恒等置换、分离 image/video token ID |
 | Holmes path 数据 | 当前降级可用 | `15,365 / 16,916`（8765 image + 6600 video）；缺 1551 video，strict full 默认拒绝 |
 | mixed media decode | full 前门禁已实现 | CPU-only、spawned worker、硬超时、实时 ETA；decoder rejection 默认拒绝 |
 | B200 full KTR / baseline | 待操作者启动 | 使用 `run_full_b200.sh`；两个 variant 需串行运行并比较 artifact |
@@ -176,7 +176,7 @@ KTR 这一步的日志记录了 `E=202`、`V=202`、`T=202`、`U=360` 的 rank-l
 
 历史 full 的 116,248 条输入均为 video。为 checkpoint-500 诊断复原其取样契约，直接 trainer 对单一 modality 委托父类 `RandomSampler`；使用历史 seed 的只读重建显示旧故障附近的下一 global batch（step 530）rank 0 对应 `problem_id=192684`。这让短恢复能覆盖具体疑点，但显式 generation 同步、额外 phase trace 和诊断环境仍使它只能作为回归定位，不能与正式 baseline/KTR 指标混合。
 
-## 6. 手动启动：先诊断恢复，再正式 full
+## 6. 历史 H200 手动启动：先诊断恢复，再正式 full（归档；不得在集群 3 执行）
 
 `run_full.sh` 是唯一建议的 full launcher，且 `RUN_ROOT` 必须是**尚不存在**的新目录（原子创建，旧 artifact 不会被追加）。它会持续向终端输出：path 筛选进度、decoder verification 的 30 秒吞吐/ETA、rank 0 的训练进度和 30 秒 GPU heartbeat；四个 rank 的完整标准流保存到 `torchrun-logs/`。
 
@@ -258,7 +258,7 @@ RUN_ROOT=<ARTIFACT_ROOT>/debug-ktr-10 \
 
 诊断最低验收条件是：终端出现 `[ktr] homogeneous dataset uses the parent RandomSampler`、`synced_gpus=True`、`phase 7/7: PASS`；`training/training_complete.json` 的 `global_step >= 540`，四份 `rank_trace_rank*.jsonl` 都跨过旧故障区域且不存在新的 timeout。若仍失败，应先看 `training.log`、`torchrun-logs/` 中 watchdog dump 与每 rank 的最后一条 phase trace；本 launcher 未写入可供 `fr_trace.py` 读取的独立文件，不能把它当作可执行的事后命令。正式 full 的最低验收条件是：脚本零退出、`training/training_complete.json` 存在、`training_summary.md/json` 标为 succeeded、`source_provenance.txt`、两层数据 manifest、`gpu_metrics.jsonl` 均存在。若跑 KTR 与 baseline 两个变体，还应确认二者源码 hash、reader/backend、decoder policy 和最终 dataset SHA 一致；有 filtering 的两个 run 不能因“名称相同”就假定训练语料相同。
 
-## 7. 外部保活的安全生命周期
+## 7. 历史 H200 外部保活的安全生命周期（归档；不得在集群 3 执行）
 
 某些 GPU 节点有不属于本项目的 all-GPU keep-alive。只有同时配置 `KEEPALIVE_MAIN` 与 `KEEPALIVE_LAUNCHER` 后，full launcher 才能识别和管理它；未配置时脚本会明确提示“不检测/不控制”，操作者须自行确认没有冲突。配置后规则如下：
 
@@ -267,7 +267,7 @@ RUN_ROOT=<ARTIFACT_ROOT>/debug-ktr-10 \
 3. 正常结束、失败、`INT`、`TERM` 都会先停止并等待 launcher 所追踪的 import/path/decode process group 与 `torchrun`，然后才恢复原始保活 launcher；恢复最多等待 30 秒并验证 `main.py` 进程。
 4. 若无法确认训练已停，脚本会故意保持保活暂停，避免两个任务争抢 GPU，并在终端打印 CRITICAL 信息。
 
-配置了 keep-alive 管理时，无论成功或失败，脚本末尾都会打印下面的人工恢复命令。它是自动恢复验证失败、且确认训练已经停止和 `main.py` 不存在时的兜底；未配置 keep-alive 时，脚本只会明确说明没有可用的恢复命令：
+配置了 keep-alive 管理时，无论成功或失败，脚本末尾都会打印下面的人工恢复命令。它是**历史 H200 launcher** 的自动恢复验证失败、且确认训练已经停止和 `main.py` 不存在时的兜底；未配置 keep-alive 时，脚本只会明确说明没有可用的恢复命令。它不适用于集群 3，集群 3 必须使用 `KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start`：
 
 ```bash
 bash <KEEPALIVE_LAUNCHER>

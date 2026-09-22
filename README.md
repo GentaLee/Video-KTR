@@ -123,13 +123,16 @@ bash ../scripts/run_grpo_video_ktr.sh
 The upstream command above remains the reference launcher.  This repository
 also contains a separately gated, offline 8×B200 profile for reproducibility
 work: 16,384 prompt tokens, 768 completion tokens, `G=8`,
-FlashAttention-2, and Holmes-16k.  Its B200 paired smoke has passed, but a
+FlashAttention-2, Holmes-16k, requested `max_pixels=401408`, and
+`nframes=8`. Its B200 paired smoke has passed, but it is an 8-record
+**video-only** smoke, not distributed mixed image/video sampler coverage; a
 full epoch has **not** been started by this repository workflow.
 
-The B200 path uses `paper/per_completion`: every completion receives an exact
-top-20% mask for E/V/T, visual/temporal scores use absolute delta, one
-non-identity temporal permutation is used per rank/step, and image/video token
-IDs are handled separately.  See [B200_REPRODUCTION.md](B200_REPRODUCTION.md)
+The B200 path uses `paper/per_completion`: E/V receive an exact top-20% mask
+per completion; T receives the same exact top-20% selection for video
+completions, while image completions have an all-zero T mask by design. Visual
+and temporal scores use absolute delta, one non-identity temporal permutation
+is used per rank/step, and image/video token IDs are handled separately. See [B200_REPRODUCTION.md](B200_REPRODUCTION.md)
 for the environment, evidence, alignment table, data caveat, and recovery
 procedure; remote collaboration messages follow
 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md).

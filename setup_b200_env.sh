@@ -15,6 +15,9 @@
 #   B200_WHEELHOUSE_GRPO      staged TRL/DeepSpeed wheelhouse
 #
 # Optional:
+#   B200_MODEL_PATH            local checkpoint to verify after setup
+#   B200_MODEL_INTEGRITY_MANIFEST defaults to the pinned repository manifest
+#   B200_MODEL_INTEGRITY_REPORT durable non-authoritative verified-copy output
 #   B200_BASE_PYTHON          defaults to /opt/venv/bin/python
 #   B200_ENV_MANIFEST         defaults to $B200_ROOT/environment-manifest.json
 #   B200_ENV_GPU_RUNTIME_CHECK defaults to 1; set to 0 only when provisioning
@@ -91,6 +94,27 @@ case "${manifest_path}" in
     "${b200_root}"/*) ;;
     *) die "B200_ENV_MANIFEST must be below B200_ROOT (got ${manifest_path})" ;;
 esac
+model_path="${B200_MODEL_PATH:-}"
+model_integrity_manifest="${B200_MODEL_INTEGRITY_MANIFEST:-${repo_root}/manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json}"
+model_integrity_report="${B200_MODEL_INTEGRITY_REPORT:-${b200_root}/model_integrity_verified.json}"
+[[ "${model_integrity_manifest}" == /* ]] || die "B200_MODEL_INTEGRITY_MANIFEST must be an absolute path"
+[[ "${model_integrity_report}" == /* ]] || die "B200_MODEL_INTEGRITY_REPORT must be an absolute path"
+model_integrity_manifest="$(realpath -m "${model_integrity_manifest}")"
+model_integrity_report="$(realpath -m "${model_integrity_report}")"
+case "${model_integrity_report}" in
+    "${b200_root}"/*) ;;
+    *) die "B200_MODEL_INTEGRITY_REPORT must be below B200_ROOT (got ${model_integrity_report})" ;;
+esac
+if [[ -n "${model_path}" ]]; then
+    [[ -d "${model_path}" ]] || die "B200_MODEL_PATH is not a directory: ${model_path}"
+    model_path="$(realpath -e "${model_path}")"
+    [[ -f "${model_integrity_manifest}" ]] || die "B200_MODEL_INTEGRITY_MANIFEST is unavailable: ${model_integrity_manifest}"
+    case "${model_integrity_report}" in
+        "${model_path}"|"${model_path}"/*)
+            die "B200_MODEL_INTEGRITY_REPORT must be outside B200_MODEL_PATH so it cannot hash itself"
+            ;;
+    esac
+fi
 
 compat_files=(
     tokenizers-0.21.4-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -597,6 +621,11 @@ payload = {
     "repo_root": str(repo_root),
     "repo_revision": git_revision,
     "python_executable": sys.executable,
+    "python": {
+        "version": sys.version.split()[0],
+        "executable": sys.executable,
+        "implementation": sys.implementation.name,
+    },
     "venv": str(venv_dir),
     "platform_prefix": str(platform_prefix),
     "platform_bridge": str(platform_bridge),
@@ -644,5 +673,20 @@ print("[b200-env] torch=" + torch.__version__ + " cuda=" + str(torch.version.cud
 print("[b200-env] flash_attn=" + flash_attn.__version__ + " proofs=" + ",".join(fa2_proofs))
 print("[b200-env] manifest=" + str(manifest_path))
 PY
+
+# The full launcher trusts the pinned repository manifest, not this local
+# report.  Generating the report is an optional transfer-verification record;
+# it is possible only after every model file exactly matches the pinned JSON.
+# Environment provisioning still supports the paired CPU pod before checkpoint
+# staging has completed.
+if [[ -n "${model_path}" ]]; then
+    log "verifying all top-level model files against pinned manifest and writing local report: ${model_integrity_report}"
+    "${venv_python}" -u "${repo_root}/src/grpo_write_model_sha256_manifest.py" \
+        --model-path "${model_path}" \
+        --reference-manifest "${model_integrity_manifest}" \
+        --output "${model_integrity_report}"
+else
+    log "B200_MODEL_PATH was not supplied; no local model-integrity report was written (run_full_b200.sh still uses its pinned repository manifest)"
+fi
 
 log "PASS: isolated B200 environment is ready; manifest=${manifest_path}"

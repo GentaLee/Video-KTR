@@ -9,16 +9,18 @@
 | 项目 | B200 实现 / 已验证值 | 对齐状态 |
 | --- | --- | --- |
 | GPU / ranks | 集群 3，8×B200，8 ranks | 对齐原始 8 卡 launcher |
-| 模型 | Qwen2.5-VL-7B-COT-SFT；4 个 safetensors weight shard SHA-256 已比对 | 已验证模型身份 |
+| 模型身份 | Qwen2.5-VL-7B-COT-SFT；以可信 exact-revision manifest 与 runtime hash gate 绑定 config、index、weight shard、tokenizer/processor 等全部顶层常规文件 | gate 为 full 的必需门禁；当前文档不把旧“4 shard 已匹配”当作本机独立重哈希证据 |
 | 数据请求 | Holmes-16k | 严格性取决于媒体完整度，见“数据门禁” |
 | prompt / completion / G | 16,384 / 768 / 8 | 对齐原始 launcher |
 | attention | `flash_attention_2`；FA2 二进制含 `sm_100`，训练运行时强制解析为 FA2 | 已验证，不静默回退 |
 | 视频帧数 | `nframes=8` | 对齐上游脚本未显式设置时的代码默认值 |
-| token selector | `paper/per_completion`；每 completion 精确 `ceil(20%)` top-k；绝对 `|Δ log p|` | 对齐本次目标定义 |
+| token selector | `paper/per_completion`；E/V 对每 completion 精确 `ceil(20%)` top-k；视频 completion 的 T 同样精确 top-k；绝对 `|Δ log p|` | image completion 的 T 为设计上的全零 mask（无帧序），不伪造 temporal top-k |
 | temporal probe | 每 rank/step 一个可复现的非恒等随机置换；不加入 reverse | 满足“单次乱序”；不是所有 rank 共用同一置换 |
 | 视觉 token 定位 | 分别读取 `image_token_id` 与 `video_token_id` 后取并集 | 已修复旧 video-id/image-id 混用 |
 
 上游命令本身可见 [原始 launcher](https://github.com/zywang0104/Video-KTR/blob/main/src/scripts/run_grpo_video_ktr.sh)：8 ranks、16k prompt、768 completion、G=8、`max_pixels=401408` 与 FA2。当前实现新增的是可审计的数据/保活门禁、mixed-modality sampler、严格 attention gate 和选择器语义修正，不是把 H200 配置直接搬到 B200。
+
+full 的默认信任锚是随代码审阅、按精确 revision 固定的 [模型完整性 manifest](manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json)，而不是可变的本机输出。runtime gate 必须对本地 checkpoint 的全部顶层常规文件重新计算 SHA-256 并与该 JSON 对比，通过后才可进入 GPU 阶段，并应落盘 `runtime_gate.json`。`grpo_write_model_sha256_manifest.py` 生成的本地 verified-copy 仅可用于独立比较或恢复诊断，不能替代默认锚。这是已加入的 fail-closed 契约，**不是**“本轮已经重新哈希”的结论；实际本机 hash 证据以对应 run artifact 的 gate 输出为准。
 
 ## 已通过的最终 smoke
 
@@ -127,7 +129,10 @@ KEEP_ALIVE_DASHBOARD=0 bash <KEEPALIVE_LAUNCHER> start
 ```text
 <RUN_ROOT>/
 ├── terminal.log                         # 每阶段、ETA、heartbeat、保活 lifecycle
-├── smoke_gate.json                      # passed smoke + 关键训练源码 hash gate
+├── smoke_gate.json / smoke_gate_pre_gpu.json
+│                                        # passed smoke、关键训练源码 hash，以及占卡前复验
+├── runtime_gate.json / runtime_gate_pre_gpu.json
+│                                        # pinned 模型/环境完整性，以及占卡前复验
 ├── data_path_gate.json / data_gate.json # strict/reduced 与 mixed decoder 契约
 ├── launch_config.txt / source_provenance.txt
 ├── gpu_metrics.jsonl / resource_monitor.log
