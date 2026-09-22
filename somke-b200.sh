@@ -395,11 +395,18 @@ PY
 # libraries are loaded before resolving the top-level FA2 extension in this
 # short standalone subprocess; the main Python preflight already does this.
 flash_binary="$("${python_bin}" -c 'import torch; import flash_attn_2_cuda; print(flash_attn_2_cuda.__file__)')"
-if [[ -z "${flash_binary}" ]] || ! strings "${flash_binary}" | grep -q 'sm_100'; then
-    log "ERROR: installed FlashAttention-2 binary does not advertise sm_100; do not silently fall back to a different attention backend"
+if [[ -z "${flash_binary}" ]] || ! "${python_bin}" - "${flash_binary}" <<'PY'
+from pathlib import Path
+import sys
+
+payload = Path(sys.argv[1]).read_bytes().lower()
+raise SystemExit(0 if b"sm_100" in payload or b"sm100" in payload or b"compute_100" in payload else 1)
+PY
+then
+    log "ERROR: installed FlashAttention-2 binary does not contain an sm_100 marker; do not silently fall back to a different attention backend"
     exit 2
 fi
-log "FlashAttention-2 binary advertises sm_100: ${flash_binary}"
+log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
 
 {
     printf 'profile=8xB200-upstream-aligned\n'
