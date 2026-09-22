@@ -132,11 +132,11 @@ grpo_wheel_files=(
     yarl-1.18.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
     python_dateutil-2.9.0.post0-py2.py3-none-any.whl
     pytz-2024.2-py2.py3-none-any.whl
-    tzdata-2024.2-py3-none-any.whl
-    six-1.17.0-py3-none-any.whl
+    tzdata-2024.2-py2.py3-none-any.whl
+    six-1.17.0-py2.py3-none-any.whl
     docstring_parser-0.16-py3-none-any.whl
     shtab-1.7.1-py3-none-any.whl
-    colorama-0.4.6-py3-none-any.whl
+    colorama-0.4.6-py2.py3-none-any.whl
     regex-2024.11.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
     joblib-1.4.2-py3-none-any.whl
     tyro-0.9.10-py3-none-any.whl
