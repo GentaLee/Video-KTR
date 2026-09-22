@@ -53,6 +53,10 @@ from open_r1.trainer.video_ktr_grpo_trainer import (  # noqa: E402
     VideoKTRGRPOTrainer,
 )
 from open_r1.trainer.grpo_trainer import Qwen2VLGRPOTrainer  # noqa: E402
+from open_r1.trainer.qwen25vl_fa2_compat import (  # noqa: E402
+    apply_rotary_pos_emb_flashatt_dtype_safe,
+    install_qwen25vl_fa2_rotary_dtype_compat,
+)
 from open_r1.grpo import legacy_deepspeed_resume_safe_globals  # noqa: E402
 
 
@@ -229,6 +233,59 @@ class ResumeCompatibilityTests(unittest.TestCase):
             with legacy_deepspeed_resume_safe_globals(None):
                 pass
         safe_globals.assert_not_called()
+
+
+class Qwen25VLFA2RotaryCompatibilityTests(unittest.TestCase):
+    def test_dtype_safe_helper_preserves_fp32_rope_and_bf16_outputs(self) -> None:
+        q = torch.randn(1, 2, 1, 4, dtype=torch.bfloat16)
+        k = torch.randn_like(q)
+        cos = torch.randn(2, 8, dtype=torch.bfloat16)
+        sin = torch.randn_like(cos)
+        calls: list[tuple[torch.dtype, torch.dtype, torch.dtype]] = []
+
+        def recording_rotary(q_arg: torch.Tensor, cos_arg: torch.Tensor, sin_arg: torch.Tensor) -> torch.Tensor:
+            calls.append((q_arg.dtype, cos_arg.dtype, sin_arg.dtype))
+            return q_arg
+
+        q_embed, k_embed = apply_rotary_pos_emb_flashatt_dtype_safe(
+            q, k, cos, sin, recording_rotary
+        )
+
+        self.assertEqual(calls, [(torch.float32, torch.float32, torch.float32)] * 2)
+        self.assertEqual(q_embed.dtype, torch.bfloat16)
+        self.assertEqual(k_embed.dtype, torch.bfloat16)
+        self.assertTrue(torch.equal(q_embed, q))
+        self.assertTrue(torch.equal(k_embed, k))
+
+    def test_installer_is_signature_checked_and_idempotent(self) -> None:
+        original_calls: list[object] = []
+        rotary_calls: list[tuple[torch.dtype, torch.dtype, torch.dtype]] = []
+
+        def original(q: object, k: object, cos: object, sin: object) -> tuple[object, object]:
+            original_calls.append(q)
+            return q, k
+
+        def recording_rotary(q_arg: torch.Tensor, cos_arg: torch.Tensor, sin_arg: torch.Tensor) -> torch.Tensor:
+            rotary_calls.append((q_arg.dtype, cos_arg.dtype, sin_arg.dtype))
+            return q_arg
+
+        module = SimpleNamespace(
+            apply_rotary_pos_emb_flashatt=original,
+            apply_rotary_emb=recording_rotary,
+        )
+        self.assertTrue(install_qwen25vl_fa2_rotary_dtype_compat(module))
+        self.assertFalse(install_qwen25vl_fa2_rotary_dtype_compat(module))
+
+        q = torch.randn(1, 2, 1, 4, dtype=torch.bfloat16)
+        k = torch.randn_like(q)
+        cos = torch.randn(2, 8, dtype=torch.bfloat16)
+        sin = torch.randn_like(cos)
+        q_embed, k_embed = module.apply_rotary_pos_emb_flashatt(q, k, cos, sin)
+
+        self.assertEqual(original_calls, [])
+        self.assertEqual(rotary_calls, [(torch.float32, torch.float32, torch.float32)] * 2)
+        self.assertTrue(torch.equal(q_embed, q))
+        self.assertTrue(torch.equal(k_embed, k))
 
 
 class ModalityBlockSamplerTests(unittest.TestCase):

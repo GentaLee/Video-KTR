@@ -49,6 +49,8 @@ from trl.trainer.utils import generate_model_card, get_comet_experiment_url
 
 from qwen_vl_utils import process_vision_info
 
+from .qwen25vl_fa2_compat import install_qwen25vl_fa2_rotary_dtype_compat
+
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model
@@ -60,6 +62,37 @@ if is_wandb_available():
 # What we call a reward function is a callable that takes a list of prompts and completions and returns a list of
 # rewards. When it's a string, it's a model ID, so it's loaded as a pretrained model.
 RewardFunc = Union[str, PreTrainedModel, Callable[[list, list], list[float]]]
+
+
+def _maybe_enable_qwen25vl_fa2_rotary_dtype_compat(attn_implementation: str) -> str | None:
+    """Enable the reviewed legacy-Transformers FA2 shim only by explicit opt-in.
+
+    B200 launchers set the flag because their strict FA2 profile exercises the
+    affected Qwen2.5-VL vision path.  Keep all other profiles untouched and
+    fail closed if a caller requests the shim with a different package or
+    attention backend.
+    """
+
+    requested = os.environ.get("VIDEO_KTR_QWEN_FA2_ROTARY_DTYPE_COMPAT", "").strip().lower()
+    if not requested:
+        return None
+    if requested not in {"1", "true", "yes", "on"}:
+        raise ValueError(
+            "VIDEO_KTR_QWEN_FA2_ROTARY_DTYPE_COMPAT must be one of "
+            "1/true/yes/on when set"
+        )
+    if attn_implementation != "flash_attention_2":
+        raise RuntimeError(
+            "Qwen2.5-VL FA2 rotary dtype compatibility was requested, but "
+            f"attn_implementation={attn_implementation!r} is not flash_attention_2"
+        )
+    if transformers.__version__ != "4.49.0.dev0":
+        raise RuntimeError(
+            "Qwen2.5-VL FA2 rotary dtype compatibility is reviewed only for "
+            f"Transformers 4.49.0.dev0, got {transformers.__version__!r}"
+        )
+    installed = install_qwen25vl_fa2_rotary_dtype_compat()
+    return "installed" if installed else "already installed"
 
 
 class Qwen2VLGRPOTrainer(Trainer):
@@ -189,6 +222,15 @@ class Qwen2VLGRPOTrainer(Trainer):
         model_init_kwargs = args.model_init_kwargs or {}
         model_init_kwargs["attn_implementation"] = attn_implementation
         model_init_kwargs["torch_dtype"] = torch.bfloat16
+        qwen_fa2_compat_state = _maybe_enable_qwen25vl_fa2_rotary_dtype_compat(
+            attn_implementation
+        )
+        if qwen_fa2_compat_state and local_rank == 0:
+            print(
+                "[grpo] Qwen2.5-VL FA2 rotary dtype compatibility "
+                f"{qwen_fa2_compat_state}: FP32 cos/sin with FP32 Q/K RoPE",
+                flush=True,
+            )
 
         if isinstance(model, str):
             model_id = model

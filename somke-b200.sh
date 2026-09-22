@@ -480,7 +480,7 @@ log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
     printf 'timestamp_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'b200_root=%s\nmodel_path=%s\ndata_root=%s\ndataset_source=%s\n' "${b200_root}" "${model_path}" "${data_root}" "${dataset_source}"
     printf 'holmes_requested=Holmes-16k\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\nmax_pixels=401408\nnframes=16\n'
-    printf 'attn_implementation=flash_attention_2\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\ntemporal_permutations=1\ntemporal_include_reverse=false\n'
+    printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\ntemporal_permutations=1\ntemporal_include_reverse=false\n'
     printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
     printf 'image_video_token_ids=distinct\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
     printf 'wrapper_sha256=%s\n' "$(sha256sum "${project_root}/somke-b200.sh" | awk '{print $1}')"
@@ -510,11 +510,13 @@ KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" stop 2>&1 | tee -a "${run_ro
 wait_for_keepalive_count 0 "pause"
 wait_for_gpu_quiescence "after keep-alive pause"
 
-log "phase 5/7: executing tiny FA2 + Triton rotary forward/backward on B200 before distributed training"
-"${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
+log "phase 5/7: executing tiny FA2 + the real Qwen rotary forward/backward on B200 before distributed training"
+PYTHONPATH="${project_root}/src/r1-v/src${PYTHONPATH:+:${PYTHONPATH}}" "${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
 import torch
 from flash_attn import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary
+from open_r1.trainer.qwen25vl_fa2_compat import install_qwen25vl_fa2_rotary_dtype_compat
+from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 
 device = "cuda:0"
 q = torch.randn((1, 16, 2, 64), device=device, dtype=torch.bfloat16, requires_grad=True)
@@ -524,9 +526,14 @@ attention = flash_attn_func(q, k, v, causal=False)
 cos = torch.randn((16, 32), device=device, dtype=torch.bfloat16)
 sin = torch.randn_like(cos)
 rotary = apply_rotary(q, cos, sin, interleaved=False, inplace=False)
-(attention.float().square().mean() + rotary.float().square().mean()).backward()
+assert install_qwen25vl_fa2_rotary_dtype_compat(modeling_qwen2_5_vl)
+qwen_cos = torch.randn((16, 64), device=device, dtype=torch.bfloat16)
+qwen_sin = torch.randn_like(qwen_cos)
+qwen_q, qwen_k = modeling_qwen2_5_vl.apply_rotary_pos_emb_flashatt(q, k, qwen_cos, qwen_sin)
+assert qwen_q.dtype == torch.bfloat16 and qwen_k.dtype == torch.bfloat16
+(attention.float().square().mean() + rotary.float().square().mean() + qwen_q.float().square().mean() + qwen_k.float().square().mean()).backward()
 torch.cuda.synchronize(0)
-print("[b200-preflight] fa2_and_triton_rotary_forward_backward=ok", flush=True)
+print("[b200-preflight] fa2_and_qwen_fp32_rope_rotary_forward_backward=ok", flush=True)
 PY
 
 log "phase 6/7: launching real-time 8xB200 baseline and Video-KTR optimizer-step smoke"
@@ -555,6 +562,7 @@ export ATTN_IMPLEMENTATION=flash_attention_2
 export VARIANT="${VARIANT:-both}"
 export VIDEO_KTR_RANK_TRACE=1
 export VIDEO_KTR_REQUIRE_ATTN_IMPLEMENTATION=flash_attention_2
+export VIDEO_KTR_QWEN_FA2_ROTARY_DTYPE_COMPAT=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE="${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}"
 export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
