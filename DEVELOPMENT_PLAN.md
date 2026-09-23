@@ -1,5 +1,7 @@
 # Video-KTR：E/V/T token 归因与 Direct-GRPO 验证记录
 
+> 2026-09-23 集群 3 更新：解码超时修复、精确缓存与 CPU/GPU 重叠、自动保活和新的两条启动命令，见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)。该记录覆盖下面较早的 B200 启动流程。
+
 更新日期：2026-09-22
 交付分支：`<owner>/video-ktr-repro-handoff`
 

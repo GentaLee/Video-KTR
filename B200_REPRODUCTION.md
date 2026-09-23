@@ -1,8 +1,10 @@
 # Video-KTR：集群 3 B200 复现交付
 
+> **2026-09-23 更新：**当前启动入口、缓存/预取流水线及验证结果见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)。本文保留此前环境、参数对齐与故障的历史证据；下面的旧运行状态及启动命令不作为最新操作指引。
+
 > 远程协作消息必须先遵守 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md) 第 0 节的 `KT-HANDOFF/v1` 格式。本文只记录可复查事实；未运行的 full 不写成已完成。
 
-## 当前结论
+## 此前结论（截至 2026-09-22）
 
 集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。首次 strict KTR full wrapper 在 CPU 媒体预检中因两条 120 秒超时而 exit=1，未进入 `torchrun` / GPU full epoch；保活保持运行。修复后的 full 仍仅由操作者手动运行 [run_full_b200.sh](run_full_b200.sh)。
 
