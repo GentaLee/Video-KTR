@@ -54,6 +54,22 @@ class HandoffSyncTests(unittest.TestCase):
         self.assertEqual(module.synchronize(self.root, self.peer, check=True), 1)
         self.assertFalse((self.root / "handoff/peers").exists())
 
+    def test_peer_snapshot_only_commit_does_not_create_sync_loop(self):
+        module.synchronize(self.root, self.peer)
+        target = self.root / "handoff/peers/b200.md"
+        before = target.read_bytes()
+        self.g("add", "handoff/peers/b200.md")
+        self.g("commit", "-qm", "import peer")
+        self.g("switch", "test/video-ktr-b200")
+        (self.root / "unrelated.md").write_text("peer imported our status\n")
+        self.g("add", "unrelated.md")
+        self.g("commit", "-qm", "unrelated import")
+        peer_tip = self.g("rev-parse", "HEAD").strip()
+        self.g("switch", "test/video-ktr-h200")
+        self.assertEqual(module.synchronize(self.root, peer_tip), 0)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(self.g("status", "--porcelain"), "")
+
     def test_refuses_own_role_and_wrong_branch(self):
         with self.assertRaises(ValueError):
             module.synchronize(self.root, self.own)

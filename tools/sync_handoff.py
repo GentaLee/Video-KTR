@@ -22,11 +22,19 @@ def synchronize(root, ref, check=False):
     branch = git(root, "symbolic-ref", "--short", "HEAD").decode().strip()
     if not branch.endswith("/video-ktr-" + role):
         raise ValueError("development branch does not match local experiment role")
-    commit = git(root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}").decode().strip()
-    peer = git(root, "show", commit + ":.experiment-role").decode().strip()
+    tip = git(root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}").decode().strip()
+    peer = git(root, "show", tip + ":.experiment-role").decode().strip()
     if peer not in ROLES or peer == role:
         raise ValueError("source must be the other experiment profile")
+    # Peer-snapshot commits do not change authoritative status. Ignore them to
+    # prevent two branches endlessly importing each other's import commits.
+    commit = git(root, "log", "-1", "--format=%H", tip, "--",
+                 "handoff/STATUS.md", ".experiment-role").decode().strip()
+    if not commit:
+        raise ValueError("source has no committed status history")
     content = git(root, "show", commit + ":handoff/STATUS.md")
+    if content != git(root, "show", tip + ":handoff/STATUS.md"):
+        raise ValueError("ambiguous status history; import an explicit status commit")
     if not content or len(content) > 1024 * 1024:
         raise ValueError("peer status must be nonempty and at most 1 MiB")
     content.decode("utf-8")
