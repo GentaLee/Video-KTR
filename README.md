@@ -1,6 +1,6 @@
 # 🦈 Video-KTR: Key-Token Reinforcement for Video Reasoning
 
-> 本分支的集群 3 启动与最新流水线验证见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)：精确媒体缓存、CPU 预取、自动保活，以及 `bash launch_b200.sh ktr` / `baseline` 两个串行训练入口。
+> 本工作区专用于 **H200**。先读 [本分支状态](handoff/STATUS.md) 和 [双分支协作协议](COLLABORATION.md)。仓库保留的 B200 文件是历史/共享实现，不是本工作区的启动指引；B200 在独立工作区开发。
 
 > **Video-KTR** is a reinforcement learning framework designed for complex video reasoning.\
 > It identifies and amplifies *critical visual--temporal tokens* via selective gradient reinforcement, significantly improving video reasoning performance.
