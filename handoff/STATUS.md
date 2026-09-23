@@ -1,0 +1,26 @@
+# B200 状态（本分支唯一事实源）
+
+PROFILE: b200
+STATUS: RUNNING
+LAST_VERIFIED_UTC: 2026-09-23T04:26:08Z
+
+## 工作区责任
+
+本工作区只维护集群 3 / B200；联网开发分支为 `<owner>/video-ktr-b200`，与 H200 是独立 clone。运行集群的持久盘与开发端不同，Git 提交和 bundle 是交付边界，不存在共享目录自动更新。
+
+## 当前运行证据
+
+- run：`ktr-20260923T031639Z-2981461`，相对产物根 `artifacts/grpo-full-b200/`。
+- 当前运行源码冻结在 `d967c23`、历史分支 `<owner>/video-ktr-repro-handoff`；新开发分支不追认或修改该 run 的身份。
+- 配置：8×B200；Holmes-16k 全部 16,916 条（图像 8,765 / 视频 8,151）；16384/768/G8；FA2；8 帧；单次随机非恒等置换；per-completion top-20%、绝对 delta；每 100 步 checkpoint。
+- 全数据缓存 0 拒绝/超时；8 卡 paired smoke、两种 7-step 回归、最终保存及保活故障恢复均已通过，见 B200_PIPELINE_VALIDATION.md。
+- 最后检查：正式 KTR 152/2,115 步，训练日志及 GPU 运算持续推进；这不是实时进度。正式 baseline 尚未启动。
+- 请求 max_pixels=401408；Qwen 原有有效视频上限约 105369，不应宣称逐帧实际401408。
+
+## 边界与下一步
+
+当前运行端 `repo/` 保持不动，不 pull、不 checkout、不覆盖。后续新版本通过 bundle 放到全新 `releases/<commit>/repo/`，不自动选用。KTR 结束后 baseline 必须保持同一实验定义与关键源码；若版本仅变更文档，也须核对 critical-source/smoke gate，不把无关算法改动夹进配对对照。
+
+full 不保存全量逐 token CoT 明细；已有 smoke token_examples；完整模型效果待同一独立评测集比较。训练完成后回传脱敏摘要和哈希到开发端 `reports/<run-id>/`，本分支显式 push，H200 再导入状态快照。
+
+RECOVERY: 使用现有启动器自动管理保活；不因新开发分支而重启当前训练。新 release 的启动须显式设置原 B200_ROOT 和 B200_ENV_FILE。

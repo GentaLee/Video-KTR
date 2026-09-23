@@ -1,5 +1,7 @@
 # Video-KTR：集群 3 B200 当前复现状态
 
+> 当前运行状态以 [handoff/STATUS.md](handoff/STATUS.md) 为准；下文的旧 smoke 和故障进度保留为历史记录，不代表当前训练尚未启动。
+
 本文是当前可执行验证的简要快照。跨机器协作时，以 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md) 的固定对话格式、证据位置和交接规则为准；其中的历史 H200 记录不代表当前 B200 结论。
 
 ```text
