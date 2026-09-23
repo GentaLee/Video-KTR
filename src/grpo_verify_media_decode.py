@@ -150,8 +150,17 @@ def _decode_one(
 
     from qwen_vl_utils.vision_process import fetch_image, fetch_video
 
+    cache_root = os.environ.get("VIDEO_KTR_MEDIA_CACHE_DIR")
+    cached_media = None
+    if cache_root:
+        from grpo_media_cache import load_cached_media
+
+        cached_media, _fps = load_cached_media(
+            media_element, cache_root=cache_root, allow_create=True
+        )
+
     if media_type == "image":
-        image = fetch_image(media_element)
+        image = cached_media if cache_root else fetch_image(media_element)
         size = getattr(image, "size", None)
         if not isinstance(size, tuple) or len(size) != 2:
             raise RuntimeError(f"unexpected decoded image type: {type(image).__name__}")
@@ -164,7 +173,7 @@ def _decode_one(
             "mode": str(getattr(image, "mode", "unknown")),
         }
 
-    video = fetch_video(media_element)
+    video = cached_media if cache_root else fetch_video(media_element)
     if not hasattr(video, "ndim") or not hasattr(video, "shape"):
         raise RuntimeError(f"unexpected decoded video type: {type(video).__name__}")
     if int(video.ndim) != 4 or int(video.shape[1]) != 3:
@@ -187,6 +196,10 @@ def _decoder_worker(connection: Connection) -> None:
     # Set before importing qwen-vl-utils/torch.  The verifier has no torch.cuda
     # calls and deliberately does not inherit visible training GPUs.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    import torch
+
+    torch.set_num_threads(int(os.environ.get("VIDEO_KTR_DECODE_THREADS", "1")))
+    torch.set_num_interop_threads(1)
     while True:
         job = connection.recv()
         if job is None:
@@ -225,6 +238,26 @@ class DecoderWorkerCrash(RuntimeError):
         self.completed = completed
 
 
+def compensate_supervisor_pause(
+    slots: list[dict[str, Any]], previous: float, now: float, *, threshold: float = 10.0
+) -> float:
+    """Exclude a stopped supervisor from media deadlines, without hiding hangs.
+
+    A blocked terminal, SIGSTOP or scheduler pause can stop the parent while
+    workers have already finished. Wall-clock deadlines must not reject all
+    outstanding media on its first resumed poll. A genuinely hung worker still
+    expires when the parent is polling normally. Newly assigned jobs receive
+    only the portion of the gap during which they were active.
+    """
+    gap = now - previous
+    if gap <= threshold:
+        return 0.0
+    for slot in slots:
+        if slot["active"] is not None:
+            slot["assigned_at"] += max(0.0, now - max(previous, slot["assigned_at"]))
+    return gap
+
+
 class MediaDecodeSupervisor:
     """Bounded, killable CPU workers with one active media item per worker."""
 
@@ -232,6 +265,7 @@ class MediaDecodeSupervisor:
         self._context = mp.get_context("spawn")
         self._timeout_seconds = timeout_seconds
         self._slots = [self._spawn(worker_id) for worker_id in range(worker_count)]
+        self.supervisor_pauses: list[float] = []
 
     def _spawn(self, worker_id: int) -> dict[str, Any]:
         parent, child = self._context.Pipe(duplex=True)
@@ -304,7 +338,8 @@ class MediaDecodeSupervisor:
         accepted: set[int] = set()
         rejected: list[dict[str, Any]] = []
         timeout_count = 0
-        completed = len(records) - len(jobs)
+        completed = initial_rejection_count
+        total_jobs = len(jobs) + initial_rejection_count
         started_at = time.monotonic()
         last_status_at = started_at
         last_reported_completed = -1
@@ -335,12 +370,12 @@ class MediaDecodeSupervisor:
                 return
             elapsed = now - started_at
             rate = completed / elapsed if elapsed > 0.0 else 0.0
-            remaining = len(records) - completed
+            remaining = total_jobs - completed
             eta = f"{remaining / rate:.0f}s" if rate > 0.0 else "unknown"
             active = sum(slot["active"] is not None for slot in self._slots)
             print(
                 "[verify-media-decode] "
-                f"completed={completed}/{len(records)} active={active} accepted={len(accepted)} "
+                f"completed={completed}/{total_jobs} active={active} accepted={len(accepted)} "
                 f"rejected={initial_rejection_count + len(rejected)} timed_out={timeout_count} "
                 f"elapsed={elapsed:.0f}s rate={rate:.2f}/s eta={eta}",
                 flush=True,
@@ -362,8 +397,9 @@ class MediaDecodeSupervisor:
         for slot in self._slots:
             assign(slot)
 
+        last_supervision = time.monotonic()
         try:
-            while completed < len(records):
+            while completed < total_jobs:
                 active_slots = [slot for slot in self._slots if slot["active"] is not None]
                 if not active_slots:
                     break
@@ -406,6 +442,15 @@ class MediaDecodeSupervisor:
                     assign(slot)
 
                 now = time.monotonic()
+                pause = compensate_supervisor_pause(self._slots, last_supervision, now)
+                last_supervision = now
+                if pause:
+                    self.supervisor_pauses.append(pause)
+                    print(
+                        f"[verify-media-decode] supervisor_pause_seconds={pause:.1f}; "
+                        "active deadlines extended; this is not evidence of corrupt media",
+                        flush=True,
+                    )
                 for position, slot in enumerate(list(self._slots)):
                     index = slot["active"]
                     if index is None:
@@ -464,6 +509,9 @@ def main() -> int:
         help="optional image cap; omit to mirror the current trainer's image defaults",
     )
     parser.add_argument("--workers", type=_positive_int, default=4)
+    parser.add_argument("--threads-per-worker", type=_positive_int, default=1)
+    parser.add_argument("--cache-dir", type=Path, help="persistent exact Qwen preprocessing cache")
+    parser.add_argument("--require-all", action="store_true", help="fail if any source record is rejected")
     parser.add_argument("--timeout-seconds", type=_positive_float, default=120.0)
     parser.add_argument("--progress-every", type=int, default=500)
     parser.add_argument(
@@ -535,6 +583,22 @@ def main() -> int:
     # decoder process should see a training GPU as an available device.
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     os.environ["FORCE_QWENVL_VIDEO_READER"] = args.reader_backend
+    os.environ["VIDEO_KTR_DECODE_THREADS"] = str(args.threads_per_worker)
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ[name] = str(args.threads_per_worker)
+    if args.cache_dir:
+        os.environ["VIDEO_KTR_MEDIA_CACHE_DIR"] = str(args.cache_dir.resolve())
+
+    # Questions can reference the same media. Preserve every row in the final
+    # dataset while supervising each identical preprocessing request just once.
+    representatives: dict[str, int] = {}
+    aliases: dict[int, list[int]] = {}
+    unique_jobs: dict[int, tuple[MediaType, dict[str, Any]]] = {}
+    for index, job in jobs.items():
+        key = json.dumps(job, sort_keys=True)
+        representative = representatives.setdefault(key, index)
+        aliases.setdefault(representative, []).append(index)
+        unique_jobs.setdefault(representative, job)
 
     source_counts = _count_records(records)
     candidate_counts = _count_records(records, set(jobs))
@@ -543,6 +607,7 @@ def main() -> int:
         f"source_records={len(records)} candidates={len(jobs)} "
         f"images={candidate_counts['image']} videos={candidate_counts['video']} "
         f"workers={args.workers} timeout_seconds={args.timeout_seconds:g} "
+        f"unique_media={len(unique_jobs)} threads_per_worker={args.threads_per_worker} "
         f"backend={args.reader_backend} cuda_visible_devices=hidden",
         flush=True,
     )
@@ -553,12 +618,13 @@ def main() -> int:
     accepted: set[int] = set()
     worker_rejections: list[dict[str, Any]] = []
     completed_records = len(records) - len(jobs)
+    supervisor_pauses: list[float] = []
     if jobs:
-        supervisor = MediaDecodeSupervisor(args.workers, args.timeout_seconds)
+        supervisor = MediaDecodeSupervisor(min(args.workers, len(unique_jobs)), args.timeout_seconds)
         try:
             accepted, worker_rejections, timeout_count = supervisor.run(
                 records,
-                jobs,
+                unique_jobs,
                 required_frames=args.nframes,
                 progress_every=args.progress_every,
                 initial_rejection_count=len(rejected),
@@ -572,6 +638,15 @@ def main() -> int:
             completed_records = exc.completed
             verification_complete = False
             verification_error = str(exc)
+        supervisor_pauses = supervisor.supervisor_pauses
+        accepted = {index for representative in accepted for index in aliases[representative]}
+        worker_rejections = [
+            _safe_rejection(index, records[index], item["reason"], item["detail"])
+            for item in worker_rejections
+            for index in aliases[int(item["source_index"])]
+        ]
+        timeout_count = sum(item["reason"] == "timeout" for item in worker_rejections)
+        completed_records = len(accepted) + len(rejected) + len(worker_rejections)
 
     rejected.extend(worker_rejections)
     rejected.sort(key=lambda item: int(item["source_index"]))
@@ -596,6 +671,8 @@ def main() -> int:
         status = "failed_worker_crash"
     elif not verified:
         status = "failed_no_verified_records"
+    elif args.require_all and rejected:
+        status = "failed_rejections"
     else:
         status = "passed"
 
@@ -633,6 +710,10 @@ def main() -> int:
             "per_record_hard_timeout_seconds": args.timeout_seconds,
         },
         "workers": args.workers,
+        "threads_per_worker": args.threads_per_worker,
+        "unique_media": len(unique_jobs),
+        "cache_dir": os.environ.get("VIDEO_KTR_MEDIA_CACHE_DIR"),
+        "supervisor_pause_seconds": supervisor_pauses,
         "status_seconds": args.status_seconds,
         "source_records": len(records),
         "candidate_records": len(jobs),
@@ -654,7 +735,8 @@ def main() -> int:
 
     summary = (
         "[verify-media-decode] "
-        f"{status.upper()} verified={len(verified)} rejected={len(rejected)} "
+        f"{('COMPLETED_WITH_REJECTIONS' if status == 'passed' and rejected else status.upper())} "
+        f"verified={len(verified)} rejected={len(rejected)} "
         f"timed_out={timeout_count} manifest={manifest_path} rejections={rejection_path}"
     )
     print(summary, flush=True)

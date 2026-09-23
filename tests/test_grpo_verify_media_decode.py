@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +26,46 @@ spec.loader.exec_module(media_decode_verifier)
 
 
 class MixedMediaVerifierConfigurationTests(unittest.TestCase):
+    def test_parent_pause_does_not_expire_every_active_decoder(self) -> None:
+        slots = [
+            {"active": 1, "assigned_at": 100.0},
+            {"active": 2, "assigned_at": 1000.0},
+            {"active": None, "assigned_at": 0.0},
+        ]
+        gap = media_decode_verifier.compensate_supervisor_pause(slots, 105.0, 1100.0)
+        self.assertEqual(gap, 995.0)
+        self.assertEqual(slots[0]["assigned_at"], 1095.0)
+        self.assertEqual(slots[1]["assigned_at"], 1100.0)
+        self.assertEqual(slots[2]["assigned_at"], 0.0)
+
+    def test_normal_polling_keeps_real_hung_worker_deadline(self) -> None:
+        slots = [{"active": 1, "assigned_at": 100.0}]
+        for current in (110.0, 120.0, 130.0):
+            self.assertEqual(media_decode_verifier.compensate_supervisor_pause(slots, current - 10, current), 0)
+        self.assertEqual(slots[0]["assigned_at"], 100.0)
+
+    def test_duplicate_media_are_decoded_once_without_losing_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "image.jpg").write_bytes(b"fake media for mocked decoder")
+            records = [
+                {"data_type": "image", "path": "image.jpg", "problem_id": i}
+                for i in (3, 1, 2)
+            ]
+            source, output = root / "source.json", root / "out.json"
+            source.write_text(json.dumps(records))
+            supervisor = mock.Mock(supervisor_pauses=[])
+            supervisor.run.return_value = ({0}, [], 0)
+            with mock.patch.object(media_decode_verifier, "MediaDecodeSupervisor", return_value=supervisor), \
+                    mock.patch.dict(os.environ, {}, clear=False), \
+                    mock.patch.object(sys, "argv", [str(VERIFIER), "--source", str(source), "--media-root", str(root), "--output", str(output), "--require-all"]):
+                self.assertEqual(media_decode_verifier.main(), 0)
+            self.assertEqual(len(supervisor.run.call_args.args[1]), 1)
+            self.assertEqual(json.loads(output.read_text()), records)
+            manifest = json.loads(Path(str(output) + ".manifest.json").read_text())
+            self.assertEqual(manifest["unique_media"], 1)
+            self.assertEqual(manifest["verified_records"], 3)
+
     def test_nframes_matches_qwen_even_frame_contract(self) -> None:
         self.assertEqual(media_decode_verifier._even_nframes("8"), 8)
         for value in ("0", "1", "9"):

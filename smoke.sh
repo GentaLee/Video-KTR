@@ -317,6 +317,9 @@ write_source_provenance() {
         for source_path in \
             "${project_root}/smoke.sh" \
             "${project_root}/src/grpo_prepare_dataset.py" \
+            "${project_root}/src/grpo_media_cache.py" \
+            "${project_root}/src/grpo_media_prefetch.py" \
+            "${project_root}/src/qwen-vl-utils/src/qwen_vl_utils/vision_process.py" \
             "${project_root}/src/r1-v/src/open_r1/grpo.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/grpo_trainer.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/qwen25vl_fa2_compat.py" \
@@ -556,6 +559,9 @@ run_variant() {
         --run_name "Video-KTR-${smoke_profile}-${variant}"
         --seed 42
     )
+    if [[ -n "${VIDEO_KTR_MEDIA_CACHE_DIR:-}" ]]; then
+        command+=(--dataloader_num_workers 2 --dataloader_prefetch_factor 2 --dataloader_persistent_workers true)
+    fi
     if [[ "${variant}" == "ktr" ]]; then
         command+=(
             --video_ktr true

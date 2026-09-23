@@ -25,6 +25,7 @@ for name in \
     B200_ALLOW_PAUSE_KEEPALIVE B200_ALLOW_REDUCED_HOLMES \
     B200_ALLOW_DECODER_FILTERED B200_SMOKE_RUN_ROOT B200_ENV_MANIFEST \
     B200_MODEL_INTEGRITY_MANIFEST B200_MODEL_SHA256_MANIFEST \
+    B200_MEDIA_CACHE_DIR B200_MEDIA_DECODE_THREADS B200_DATALOADER_WORKERS \
     B200_MEDIA_DECODE_WORKERS B200_MEDIA_DECODE_TIMEOUT_SECONDS \
     B200_MEDIA_DECODE_PROGRESS_EVERY B200_MEDIA_DECODE_STATUS_SECONDS; do
     if [[ -v "${name}" ]]; then
@@ -49,7 +50,7 @@ python_bin="${PYTHON_BIN:-${b200_root}/venv/bin/python}"
 model_path="${B200_MODEL_PATH:-${b200_root}/model/Qwen2.5-VL-7B-COT-SFT}"
 data_root="${B200_DATA_ROOT:-${b200_root}/data}"
 dataset_source="${B200_DATASET_SOURCE:-${data_root}/Video-R1-Holmes-16k.json}"
-smoke_root="${B200_SMOKE_RUN_ROOT:-${b200_root}/artifacts/grpo-smoke-b200/20260922T044249Z}"
+smoke_root="${B200_SMOKE_RUN_ROOT:-${b200_root}/artifacts/grpo-smoke-b200/latest-passed}"
 environment_manifest="${B200_ENV_MANIFEST:-${b200_root}/environment-manifest.json}"
 model_integrity_manifest="${B200_MODEL_INTEGRITY_MANIFEST:-${B200_MODEL_SHA256_MANIFEST:-${project_root}/manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json}}"
 keepalive_main="${B200_KEEPALIVE_MAIN:-}"
@@ -78,6 +79,9 @@ decoder_workers="${B200_MEDIA_DECODE_WORKERS:-8}"
 decoder_timeout_seconds="${B200_MEDIA_DECODE_TIMEOUT_SECONDS:-600}"
 decoder_progress_every="${B200_MEDIA_DECODE_PROGRESS_EVERY:-100}"
 decoder_status_seconds="${B200_MEDIA_DECODE_STATUS_SECONDS:-30}"
+decoder_threads="${B200_MEDIA_DECODE_THREADS:-1}"
+media_cache_dir="${B200_MEDIA_CACHE_DIR:-${b200_root}/cache/qwen-media-v1}"
+dataloader_workers="${B200_DATALOADER_WORKERS:-2}"
 ddp_timeout_seconds="${DDP_TIMEOUT_SECONDS:-600}"
 min_free_gib=170
 full_output_selected_token="${FULL_OUTPUT_SELECTED_TOKEN:-false}"
@@ -103,6 +107,7 @@ preflight_label=""
 training_pid=""
 monitor_pid=""
 heartbeat_pid=""
+log_follower_pid=""
 training_started=""
 training_ended=""
 training_exit=""
@@ -123,6 +128,17 @@ if [[ "${environment_manifest}" != /* || "${model_integrity_manifest}" != /* ]];
     printf '[b200-full] ERROR: B200 environment/model integrity manifests must be absolute paths\n' >&2
     exit 2
 fi
+if [[ "${media_cache_dir}" != /* ]] || is_ephemeral_path "${media_cache_dir}"; then
+    printf '[b200-full] ERROR: media cache must use an absolute durable path\n' >&2
+    exit 2
+fi
+# Share this lock with smoke: two operators must not independently stop/start
+# protection or launch KTR and baseline on the same eight GPUs.
+exec 9>"${b200_root}/.b200-training.lock"
+if ! flock -n 9; then
+    printf '[b200-full] ERROR: another B200 smoke/full task owns this node; run variants serially\n' >&2
+    exit 2
+fi
 if [[ -e "${run_root}" ]]; then
     printf '[b200-full] ERROR: RUN_ROOT must name a new directory: %s\n' "${run_root}" >&2
     exit 2
@@ -133,8 +149,15 @@ if ! mkdir -p "$(dirname "${run_root}")" || ! mkdir "${run_root}"; then
 fi
 
 log() {
-    printf '[%(%Y-%m-%d %H:%M:%S)T] [b200-full] %s\n' -1 "$*" | tee -a "${run_root}/terminal.log"
+    printf '[%(%Y-%m-%d %H:%M:%S)T] [b200-full] %s\n' -1 "$*" >> "${run_root}/terminal.log"
 }
+
+# Producers write regular files. A slow, disconnected or flow-controlled IDE
+# terminal may block this observer, but can never block decoder supervision or
+# torchrun. The detached entrypoint also survives terminal disconnects.
+touch "${run_root}/terminal.log"
+tail --pid="$$" --sleep-interval=0.2 -n +1 -f "${run_root}/terminal.log" &
+log_follower_pid="$!"
 
 require_path() {
     local label="$1"
@@ -178,7 +201,8 @@ process_is_live() {
 process_group_is_live() {
     local process_group_id="${1:-}"
     [[ "${process_group_id}" =~ ^[1-9][0-9]*$ ]] || return 1
-    kill -0 -- "-${process_group_id}" 2>/dev/null
+    ps -eo pgid=,stat= | awk -v group="${process_group_id}" \
+        '$1 == group && $2 !~ /^Z/ { found=1 } END { exit !found }'
 }
 
 stop_child() {
@@ -330,7 +354,7 @@ start_keepalive() {
         return 1
     fi
     log "keep-alive restore: invoking official controller"
-    KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" start 2>&1 | tee -a "${run_root}/keepalive.log"
+    KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" start 9>&- 2>&1 | tee -a "${run_root}/keepalive.log" >> "${run_root}/terminal.log"
     wait_for_keepalive_count 1 "restore"
     keepalive_paused=0
     keepalive_stop_requested=0
@@ -364,6 +388,9 @@ write_source_provenance() {
             "${project_root}/src/grpo_write_model_sha256_manifest.py" \
             "${project_root}/src/grpo_prepare_dataset.py" \
             "${project_root}/src/grpo_verify_media_decode.py" \
+            "${project_root}/src/grpo_media_cache.py" \
+            "${project_root}/src/grpo_media_prefetch.py" \
+            "${project_root}/src/qwen-vl-utils/src/qwen_vl_utils/vision_process.py" \
             "${project_root}/src/r1-v/src/open_r1/grpo.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/grpo_trainer.py" \
             "${project_root}/src/r1-v/src/open_r1/trainer/qwen25vl_fa2_compat.py" \
@@ -444,7 +471,7 @@ write_summary() {
         --exit-code "${training_exit}" \
         --started-epoch-seconds "${training_started}" \
         --ended-epoch-seconds "${training_ended}" \
-        2>&1 | tee -a "${run_root}/terminal.log"
+        >> "${run_root}/terminal.log" 2>&1
     summary_written=1
 }
 
@@ -537,6 +564,8 @@ cleanup() {
     else
         log "B200 full wrapper ended with exit=${status}; artifacts remain at ${run_root}"
     fi
+    sleep 0.3
+    stop_child "${log_follower_pid}"
     exit "${status}"
 }
 trap cleanup EXIT
@@ -551,8 +580,7 @@ run_logged_preflight() {
         return 2
     fi
     log "${label}: started; progress remains visible below"
-    RUN_B200_PIPELINE_LOG="${run_root}/terminal.log" \
-        setsid bash -c 'set -o pipefail; "$@" 2>&1 | tee -a "${RUN_B200_PIPELINE_LOG}"' bash "$@" &
+    setsid "$@" >> "${run_root}/terminal.log" 2>&1 &
     preflight_pid="$!"
     preflight_label="${label}"
     local observed_pgid=""
@@ -576,6 +604,9 @@ run_logged_preflight() {
     else
         status=$?
     fi
+    if process_group_is_live "${preflight_pid}"; then
+        stop_owned_process_group "CPU preflight (${label}) descendants" "${preflight_pid}" || return 5
+    fi
     preflight_pid=""
     preflight_label=""
     if (( status != 0 )); then
@@ -594,7 +625,7 @@ if [[ "${allow_pause}" != "1" ]]; then
     log "ERROR: set B200_ALLOW_PAUSE_KEEPALIVE=1 only when this manually requested full run may pause and restore the known keep-alive"
     exit 2
 fi
-for value in "${heartbeat_seconds}" "${gpu_sample_seconds}" "${decoder_workers}" "${decoder_timeout_seconds}" "${decoder_progress_every}" "${decoder_status_seconds}" "${ddp_timeout_seconds}"; do
+for value in "${heartbeat_seconds}" "${gpu_sample_seconds}" "${decoder_workers}" "${decoder_threads}" "${dataloader_workers}" "${decoder_timeout_seconds}" "${decoder_progress_every}" "${decoder_status_seconds}" "${ddp_timeout_seconds}"; do
     require_positive_integer "configuration value" "${value}"
 done
 if [[ "${max_steps}" != "-1" && ! "${max_steps}" =~ ^[1-9][0-9]*$ ]]; then
@@ -652,6 +683,10 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export WANDB_MODE=offline
 export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export VIDEO_KTR_MEDIA_CACHE_DIR="${media_cache_dir}"
 export FORCE_QWENVL_VIDEO_READER=torchvision
 export SETUPTOOLS_USE_DISTUTILS=local
 export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/open_r1:${project_root}/src/r1-v/src:${project_root}/src/qwen-vl-utils/src"
@@ -660,6 +695,14 @@ export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/
 # the torchrun parent and runtime gate use our pinned project venv.
 export PYTHON_EXEC="${python_bin}"
 export MODEL_PATH="${model_path}"
+
+find_keepalive_pids
+if (( ${#keepalive_pids[@]} == 0 )); then
+    start_keepalive
+elif (( ${#keepalive_pids[@]} != 1 )); then
+    log "ERROR: multiple matching keep-alive processes; controller identity is ambiguous"
+    exit 2
+fi
 
 triton_cuda_include_dir="${TRITON_CUDA_INCLUDE_DIR:-}"
 if [[ -z "${triton_cuda_include_dir}" ]]; then
@@ -721,7 +764,7 @@ run_logged_preflight "B200 pinned model/environment integrity gate" \
     --environment-manifest "${environment_manifest}" \
     --project-root "${project_root}" \
     --output "${runtime_gate}"
-"${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
+"${python_bin}" - >> "${run_root}/terminal.log" 2>&1 <<'PY'
 import os
 from importlib import metadata
 
@@ -828,7 +871,11 @@ if [[ "${allow_reduced}" == "1" ]]; then
 fi
 run_logged_preflight "Holmes strict/reduced class gate" "${path_gate_args[@]}"
 
-log "phase 6/8: CPU-only mixed image/video Qwen decode preflight; workers=${decoder_workers}, per-record timeout=${decoder_timeout_seconds}s; terminal will show throughput and ETA"
+log "phase 6/8: CPU-only mixed image/video Qwen decode preflight; reuse exact cache=${media_cache_dir}; workers=${decoder_workers}, threads=${decoder_threads}, timeout=${decoder_timeout_seconds}s; first build decodes unique media, later runs validate cached payloads"
+decoder_strict_args=()
+if [[ "${allow_decoder_filtered}" == "0" ]]; then
+    decoder_strict_args+=(--require-all)
+fi
 run_logged_preflight "mixed media decode verification" \
     env CUDA_VISIBLE_DEVICES="" \
     "${python_bin}" -u "${project_root}/src/grpo_verify_media_decode.py" \
@@ -839,6 +886,9 @@ run_logged_preflight "mixed media decode verification" \
     --max-pixels "${max_pixels}" \
     --reader-backend torchvision \
     --workers "${decoder_workers}" \
+    --threads-per-worker "${decoder_threads}" \
+    --cache-dir "${media_cache_dir}" \
+    "${decoder_strict_args[@]}" \
     --timeout-seconds "${decoder_timeout_seconds}" \
     --progress-every "${decoder_progress_every}" \
     --status-seconds "${decoder_status_seconds}"
@@ -887,6 +937,7 @@ write_source_provenance "${run_root}/source_provenance.txt"
     printf 'nproc_per_node=8\nmax_prompt_length=16384\nmax_completion_length=768\nnum_generations=8\n'
     printf 'requested_cli_max_pixels=401408\nqwen_file_video_effective_cap=105369\nobserved_smoke_video_pixels=94080-98784\nnframes=8\n'
     printf 'media_decode_workers=%s\nmedia_decode_timeout_seconds=%s\n' "${decoder_workers}" "${decoder_timeout_seconds}"
+    printf 'media_cache_dir=%s\nmedia_decode_threads=%s\ndataloader_workers=%s\ndataloader_prefetch_factor=2\n' "${media_cache_dir}" "${decoder_threads}" "${dataloader_workers}"
     printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\n'
     printf 'selection_mode=paper\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\n'
     printf 'temporal_permutations=1\ntemporal_include_reverse=false\ntemporal_seed=43\n'
@@ -920,7 +971,7 @@ if ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_t
     exit 2
 fi
 keepalive_stop_requested=1
-KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" stop 2>&1 | tee -a "${run_root}/keepalive.log"
+KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" stop 9>&- 2>&1 | tee -a "${run_root}/keepalive.log" >> "${run_root}/terminal.log"
 wait_for_keepalive_count 0 "pause"
 keepalive_paused=1
 wait_for_gpu_quiescence "after keep-alive pause"
@@ -940,7 +991,7 @@ export TORCH_NCCL_DUMP_ON_TIMEOUT="${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-COLL}"
-"${python_bin}" - <<'PY' 2>&1 | tee -a "${run_root}/terminal.log"
+"${python_bin}" - >> "${run_root}/terminal.log" 2>&1 <<'PY'
 import torch
 from flash_attn import flash_attn_func
 from flash_attn.layers.rotary import apply_rotary
@@ -1030,6 +1081,9 @@ command=(
     --ds3_gather_for_generation true
     --report_to none
     --remove_unused_columns false
+    --dataloader_num_workers "${dataloader_workers}"
+    --dataloader_prefetch_factor 2
+    --dataloader_persistent_workers true
     --use_vllm false
     --data_root "${data_root}"
     --selection_mode paper
@@ -1047,7 +1101,8 @@ command=(
     --seed 42
 )
 set +e
-setsid "${command[@]}" > >(tee -a "${run_root}/training.log") 2>&1 &
+B200_TRAINING_LOG="${run_root}/training.log" B200_PIPELINE_LOG="${run_root}/terminal.log" \
+    setsid bash -c 'set -o pipefail; "$@" 2>&1 | tee -a "${B200_TRAINING_LOG}" >> "${B200_PIPELINE_LOG}"' bash "${command[@]}" &
 training_pid="$!"
 for (( attempt = 0; attempt < 30; attempt += 1 )); do
     observed_pgid="$(ps -o pgid= -p "${training_pid}" 2>/dev/null | tr -d '[:space:]' || true)"
@@ -1062,8 +1117,11 @@ if process_is_live "${training_pid}" && [[ "${observed_pgid}" != "${training_pid
 fi
 wait "${training_pid}"
 training_exit="$?"
-training_pid=""
 set -e
+if process_group_is_live "${training_pid}"; then
+    stop_owned_process_group "full torchrun descendants" "${training_pid}" || exit 5
+fi
+training_pid=""
 training_ended="$(date +%s.%N)"
 stop_child "${heartbeat_pid}"
 stop_child "${monitor_pid}"
@@ -1076,7 +1134,7 @@ if (( training_exit != 0 )); then
     for rank_log in "${run_root}"/torchrun-logs/*/attempt_*/*/stderr.log; do
         if [[ -s "${rank_log}" ]] && grep -Eiq 'Traceback|Error|Exception' "${rank_log}"; then
             log "first worker traceback: ${rank_log}"
-            tail -n 80 "${rank_log}" | tee -a "${run_root}/terminal.log"
+            tail -n 80 "${rank_log}" >> "${run_root}/terminal.log"
             break
         fi
     done

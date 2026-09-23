@@ -255,6 +255,26 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
         self._modality_sampler_plan_path = (
             Path(self.args.output_dir) / "modality_sampler_plan.jsonl"
         )
+        self._media_cache_root = os.environ.get("VIDEO_KTR_MEDIA_CACHE_DIR", "").strip()
+        if self._media_cache_root:
+            from grpo_media_prefetch import CachedMediaCollator
+
+            self.data_collator = CachedMediaCollator(
+                data_root=str(self.data_root),
+                cache_root=self._media_cache_root,
+                nframes=self.nframes,
+                max_pixels=self.max_pixels,
+            )
+
+    def get_train_dataloader(self) -> Any:
+        dataloader = super().get_train_dataloader()
+        if getattr(self, "_media_cache_root", ""):
+            from grpo_media_prefetch import use_spawn_for_cpu_prefetch
+
+            # Preserve HF/Accelerate sampling and sharding; only select how
+            # its existing CPU workers are started before first iteration.
+            use_spawn_for_cpu_prefetch(dataloader)
+        return dataloader
 
     def _rank_trace(self, phase: str, **fields: Any) -> None:
         """Append a flushed per-rank phase marker when a diagnostic run opts in.
@@ -506,9 +526,26 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             data_type=data_type,
         )
         try:
-            image_inputs, video_inputs, video_kwargs = process_vision_info(
-                messages, return_video_kwargs=True
-            )
+            if getattr(self, "_media_cache_root", ""):
+                from grpo_media_prefetch import MEDIA_PAYLOAD_KEY, PreparedMedia
+
+                prepared = example.get(MEDIA_PAYLOAD_KEY)
+                if not isinstance(prepared, PreparedMedia):
+                    raise RuntimeError("media cache mode requires the CPU cache collator payload")
+                if (
+                    prepared.media_type != data_type
+                    or prepared.media_path != str(media)
+                    or prepared.nframes != self.nframes
+                    or prepared.max_pixels != self.max_pixels
+                ):
+                    raise RuntimeError("prefetched media identity or preprocessing settings changed")
+                image_inputs = prepared.image_inputs
+                video_inputs = prepared.video_inputs
+                video_kwargs = prepared.video_kwargs
+            else:
+                image_inputs, video_inputs, video_kwargs = process_vision_info(
+                    messages, return_video_kwargs=True
+                )
         except BaseException as exc:
             self._rank_trace(
                 "decode_error",
@@ -1055,7 +1092,9 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             reward_kwargs = {
                 key: []
                 for key in inputs[0]
-                if key not in {"prompt", "completion"}
+                # The collator's CPU payload is transport state, not dataset
+                # metadata; keep reward function inputs unchanged.
+                if key not in {"prompt", "completion", "_video_ktr_preprocessed_media"}
             }
             for key in reward_kwargs:
                 for example in inputs:

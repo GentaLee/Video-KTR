@@ -39,9 +39,15 @@ REQUIRED_PROFILE = {
     "temporal_permutations": "1",
     "temporal_include_reverse": "false",
     "image_video_token_ids": "distinct",
+    "media_preprocessing": "exact-cache-v1",
+    "dataloader_workers": "2",
+    "dataloader_prefetch_factor": "2",
 }
 
 CRITICAL_SOURCES = (
+    "src/grpo_media_cache.py",
+    "src/grpo_media_prefetch.py",
+    "src/qwen-vl-utils/src/qwen_vl_utils/vision_process.py",
     "src/r1-v/src/open_r1/grpo.py",
     "src/r1-v/src/open_r1/trainer/grpo_trainer.py",
     "src/r1-v/src/open_r1/trainer/qwen25vl_fa2_compat.py",

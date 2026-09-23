@@ -20,6 +20,7 @@ explicit_b200_values=()
 for name in \
     B200_ROOT B200_ENV_FILE B200_RUN_ROOT B200_MODEL_PATH B200_DATA_ROOT \
     B200_DATASET_SOURCE B200_KEEPALIVE_MAIN B200_KEEPALIVE_LAUNCHER \
+    B200_MEDIA_CACHE_DIR \
     B200_ALLOW_PAUSE_KEEPALIVE B200_SMOKE_PROBLEM_IDS; do
     if [[ -v "${name}" ]]; then
         explicit_b200_names+=("${name}")
@@ -61,6 +62,12 @@ delegated_pid=""
 delegated_pgid=""
 keepalive_original_pid=""
 keepalive_original_ticks=""
+
+exec 9>"${b200_root}/.b200-training.lock"
+if ! flock -n 9; then
+    printf '[b200-smoke] ERROR: another B200 full/smoke task owns this node\n' >&2
+    exit 2
+fi
 
 mkdir -p "${run_root}"
 
@@ -228,7 +235,7 @@ start_keepalive() {
         return 1
     fi
     log "keep-alive restore: invoking the official controller"
-    KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" start 2>&1 | tee -a "${run_root}/keepalive.log"
+    KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" start 9>&- 2>&1 | tee -a "${run_root}/keepalive.log"
     wait_for_keepalive_count 1 "restore"
     keepalive_paused=0
     keepalive_stop_requested=0
@@ -286,6 +293,15 @@ cleanup() {
     fi
     if (( status == 0 )); then
         log "B200 smoke wrapper completed successfully"
+        local latest="${b200_root}/artifacts/grpo-smoke-b200/latest-passed"
+        if [[ -e "${latest}" && ! -L "${latest}" ]]; then
+            log "ERROR: latest-passed exists but is not a symlink; leaving it intact"
+            status=5
+        else
+            mkdir -p "$(dirname "${latest}")"
+            ln -s "$(realpath "${run_root}")" "${latest}.$$"
+            mv -Tf "${latest}.$$" "${latest}"
+        fi
     else
         log "B200 smoke wrapper ended with exit=${status}; artifacts remain at ${run_root}"
     fi
@@ -356,6 +372,11 @@ require_path "venv site-packages" "${site_dir}"
 export PYTHONNOUSERSITE=1
 export SETUPTOOLS_USE_DISTUTILS=local
 export FORCE_QWENVL_VIDEO_READER=torchvision
+export VIDEO_KTR_MEDIA_CACHE_DIR="${B200_MEDIA_CACHE_DIR:-${b200_root}/cache/qwen-media-v1}"
+export PYTHON_EXEC="${python_bin}"
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
 # Python consults PYTHONPATH before site-packages.  Put the pinned venv first
 # and discard any inherited control-plane paths so phase 2 cannot validate a
 # platform Transformers build that differs from the runtime we launch.
@@ -510,6 +531,7 @@ log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
     printf 'attn_implementation=flash_attention_2\nqwen_fa2_rotary_dtype_compat=true\nselection_scope=per_completion\nselection_ratio=0.2\ndelta=absolute\ntemporal_permutations=1\ntemporal_include_reverse=false\n'
     printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
     printf 'image_video_token_ids=distinct\nvideo_reader_backend=torchvision\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
+    printf 'media_preprocessing=exact-cache-v1\ndataloader_workers=2\ndataloader_prefetch_factor=2\n'
     printf 'wrapper_sha256=%s\n' "$(sha256sum "${project_root}/somke-b200.sh" | awk '{print $1}')"
     printf 'delegate_sha256=%s\n' "$(sha256sum "${project_root}/smoke.sh" | awk '{print $1}')"
 } > "${run_root}/b200_profile.txt"
@@ -526,6 +548,17 @@ else
     log "keep-alive preflight: known main process is pid=${keepalive_pids[0]}"
 fi
 capture_keepalive_identity
+
+log "phase 3.5/7: preparing exact CPU media cache for smoke while protection remains active"
+"${python_bin}" -u "${project_root}/src/grpo_prepare_dataset.py" \
+    --source "${dataset_source}" --video-root "${data_root}" \
+    --output "${run_root}/cache-smoke-source.json" --data-type video \
+    --problem-ids "${smoke_problem_ids}" --progress-every 100
+env CUDA_VISIBLE_DEVICES="" "${python_bin}" -u "${project_root}/src/grpo_verify_media_decode.py" \
+    --source "${run_root}/cache-smoke-source.json" --media-root "${data_root}" \
+    --output "${run_root}/cache-smoke-verified.json" --nframes 8 --max-pixels 401408 \
+    --workers 2 --threads-per-worker 1 --timeout-seconds 600 --require-all \
+    --cache-dir "${VIDEO_KTR_MEDIA_CACHE_DIR}" --progress-every 1
 
 log "phase 4/7: stopping keep-alive through its official controller; it remains paused only while smoke work owns the GPUs"
 if ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_ticks}"; then
