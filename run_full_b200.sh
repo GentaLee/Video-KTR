@@ -99,6 +99,7 @@ path_gate="${run_root}/data_path_gate.json"
 data_gate="${run_root}/data_gate.json"
 
 keepalive_paused=0
+keepalive_managed=0
 keepalive_stop_requested=0
 keepalive_original_pid=""
 keepalive_original_ticks=""
@@ -353,11 +354,32 @@ start_keepalive() {
         log "ERROR: keep-alive restore is ambiguous (${keepalive_pids[*]}); refusing another copy"
         return 1
     fi
+    wait_for_gpu_quiescence "before starting an absent keep-alive" || return 1
     log "keep-alive restore: invoking official controller"
     KEEP_ALIVE_DASHBOARD=0 bash "${keepalive_launcher}" start 9>&- 2>&1 | tee -a "${run_root}/keepalive.log" >> "${run_root}/terminal.log"
     wait_for_keepalive_count 1 "restore"
     keepalive_paused=0
     keepalive_stop_requested=0
+}
+
+ensure_cpu_keepalive() {
+    # Called only by the controlling shell while CPU preflight owns the node.
+    # No independent watchdog can race the intentional pause for GPU work.
+    if (( ${keepalive_paused:-0} == 1 || ${keepalive_stop_requested:-0} == 1 )); then
+        return 0
+    fi
+    find_keepalive_pids
+    if (( ${#keepalive_pids[@]} == 0 )); then
+        log "CPU protection: keep-alive disappeared; restoring through official controller"
+        start_keepalive || return 1
+        capture_keepalive_identity || return 1
+    elif (( ${#keepalive_pids[@]} != 1 )); then
+        log "ERROR: CPU protection found multiple matching keep-alive processes"
+        return 1
+    elif ! same_keepalive_identity "${keepalive_original_pid}" "${keepalive_original_ticks}"; then
+        capture_keepalive_identity || return 1
+    fi
+    log "CPU protection: verified one active keep-alive while ${preflight_label:-preparing data}"
 }
 
 heartbeat_loop() {
@@ -540,6 +562,13 @@ cleanup() {
             log "CRITICAL: keep-alive state is ambiguous after failed stop request (${keepalive_pids[*]})"
         fi
     fi
+    if (( ${keepalive_managed:-0} == 1 && keepalive_paused == 0 )); then
+        find_keepalive_pids
+        if (( ${#keepalive_pids[@]} == 0 )); then
+            keepalive_paused=1
+            log "cleanup: protection is absent after CPU work; restoration is required"
+        fi
+    fi
     if (( keepalive_paused == 1 )); then
         if (( owned_processes_stopped != 1 )); then
             restore_status=1
@@ -599,6 +628,19 @@ run_logged_preflight() {
         return 2
     fi
     local status=0
+    if (( ${keepalive_managed:-0} == 1 && ${keepalive_paused:-0} == 0 && ${keepalive_stop_requested:-0} == 0 )); then
+        local guard_elapsed=0
+        while process_is_live "${preflight_pid}"; do
+            if (( guard_elapsed % heartbeat_seconds == 0 )); then
+                if ! ensure_cpu_keepalive; then
+                    log "ERROR: CPU preflight lost managed GPU protection"
+                    return 5
+                fi
+            fi
+            sleep 1
+            ((guard_elapsed += 1))
+        done
+    fi
     if wait "${preflight_pid}"; then
         status=0
     else
@@ -696,6 +738,7 @@ export PYTHONPATH="${site_dir}:${project_root}/src:${project_root}/src/r1-v/src/
 export PYTHON_EXEC="${python_bin}"
 export MODEL_PATH="${model_path}"
 
+keepalive_managed=1
 find_keepalive_pids
 if (( ${#keepalive_pids[@]} == 0 )); then
     start_keepalive

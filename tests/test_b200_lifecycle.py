@@ -14,6 +14,7 @@ import unittest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "run_full_b200.sh"
+DETACHED_SCRIPT = SCRIPT.with_name("launch_b200.sh")
 
 
 def shell_function(source: str, name: str) -> str:
@@ -117,6 +118,7 @@ class B200LifecycleTest(unittest.TestCase):
             '#!/usr/bin/env bash\nset -eu\n'
             'printf "controller:%s\\n" "$1" >> "$EVENT_LOG"\n'
             'if [[ "$1" == start ]]; then printf 1 > "$COUNT_FILE"; fi\n'
+            'if [[ "$1" == start && -n "${PID_FILE:-}" ]]; then printf 2000 > "$PID_FILE"; fi\n'
         )
         return "\n".join(
             [
@@ -127,7 +129,8 @@ class B200LifecycleTest(unittest.TestCase):
                 'keepalive_paused=1; keepalive_stop_requested=1; keepalive_pids=()',
                 'find_keepalive_pids() { local count; count="$(<"$COUNT_FILE")"; keepalive_pids=(); '
                 'for ((i=0; i<count; i++)); do keepalive_pids+=("$((1000+i))"); done; }',
-                self.functions("log", "wait_for_keepalive_count", "start_keepalive"),
+                'query_gpu_compute_pids() { gpu_compute_pid_snapshot=(); }',
+                self.functions("log", "wait_for_gpu_quiescence", "wait_for_keepalive_count", "start_keepalive"),
             ]
         )
 
@@ -185,8 +188,77 @@ class B200LifecycleTest(unittest.TestCase):
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertEqual(
                     (root / "events").read_text().splitlines(),
-                    ["stop:CPU preflight (decoder)", "stop:full torchrun", "gpu-query", "controller:start"],
+                    ["stop:CPU preflight (decoder)", "stop:full torchrun", "gpu-query", "gpu-query", "controller:start"],
                 )
+
+    def test_cpu_guard_restores_disappeared_keepalive_and_refreshes_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "keeper-pid").write_text("1000")
+            cpu_job = (
+                'sleep 0.15; printf 0 > "$COUNT_FILE"; '
+                'printf "keeper-disappeared\\n" >> "$EVENT_LOG"; '
+                'for ((i=0; i<200; i++)); do '
+                'if [[ "$(<"$COUNT_FILE")" == 1 ]]; then '
+                'printf "cpu-complete\\n" >> "$EVENT_LOG"; exit 0; fi; sleep 0.02; done; exit 19'
+            )
+            shell = "\n".join(
+                [
+                    self.controller_fixture(root, 1),
+                    f"export PID_FILE={shlex.quote(str(root / 'keeper-pid'))}",
+                    'keepalive_managed=1; keepalive_paused=0; keepalive_stop_requested=0',
+                    'keepalive_original_pid=1000; keepalive_original_ticks=1010',
+                    'preflight_pid=""; preflight_label=""; training_pid=""; heartbeat_seconds=1',
+                    'find_keepalive_pids() { keepalive_pids=(); '
+                    'if [[ "$(<"$COUNT_FILE")" == 1 ]]; then keepalive_pids=("$(<"$PID_FILE")"); fi; }',
+                    'process_start_ticks() { printf "%s" "$(( $1 + 10 ))"; }',
+                    'process_has_exact_keepalive_main() { [[ "$(<"$COUNT_FILE")" == 1 && "$1" == "$(<"$PID_FILE")" ]]; }',
+                    'query_gpu_compute_pids() { printf "gpu-query\\n" >> "$EVENT_LOG"; gpu_compute_pid_snapshot=(); }',
+                    self.functions("same_keepalive_identity", "capture_keepalive_identity", "ensure_cpu_keepalive", "process_is_live", "process_group_is_live", "stop_owned_process_group", "run_logged_preflight"),
+                    "run_logged_preflight guarded-cpu bash -c " + shlex.quote(cpu_job),
+                    '[[ "$keepalive_original_pid" == 2000 && "$keepalive_original_ticks" == 2010 ]]',
+                    '[[ "$keepalive_paused" == 0 && -z "$preflight_pid" ]]',
+                ]
+            )
+            result = self.run_shell(shell, timeout=7)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                (root / "events").read_text().splitlines(),
+                ["keeper-disappeared", "gpu-query", "controller:start", "cpu-complete"],
+            )
+            self.assertEqual((root / "keeper-pid").read_text(), "2000")
+            self.assertIn("keep-alive disappeared", (root / "terminal.log").read_text())
+            self.assertIn("identity validated", (root / "terminal.log").read_text())
+
+    def test_guard_is_inactive_when_unmanaged_paused_or_pause_requested(self) -> None:
+        for managed, paused, stop_requested in ((0, 0, 0), (1, 1, 1), (1, 0, 1)):
+            with self.subTest(managed=managed, paused=paused, stop_requested=stop_requested), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shell = "\n".join(
+                    [
+                        f"run_root={shlex.quote(directory)}",
+                        f"keepalive_managed={managed}; keepalive_paused={paused}; keepalive_stop_requested={stop_requested}",
+                        'preflight_pid=""; preflight_label=""; heartbeat_seconds=1',
+                        'ensure_cpu_keepalive() { printf called > "${run_root}/guard-called"; return 1; }',
+                        self.functions("log", "process_is_live", "process_group_is_live", "stop_owned_process_group", "run_logged_preflight"),
+                        "run_logged_preflight bounded-dummy bash -c 'sleep 0.1'",
+                    ]
+                )
+                result = self.run_shell(shell)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((root / "guard-called").exists(), "CPU guard ran during the GPU pause boundary")
+
+    def test_cleanup_restores_managed_protection_missing_after_cpu_work(self) -> None:
+        for status in (0, 17):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                shell = self.cleanup_fixture(root)
+                shell += '\nkeepalive_managed=1; keepalive_paused=0; keepalive_stop_requested=0\n'
+                result = self.run_shell(shell + f"exit {status}")
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual((root / "count").read_text(), "1")
+                self.assertEqual((root / "events").read_text().count("controller:start"), 1)
+                self.assertIn("protection is absent after CPU work", (root / "terminal.log").read_text())
 
     def test_cleanup_keeps_protection_paused_if_owned_work_or_gpu_is_busy(self) -> None:
         for stop_ok, gpu_empty in ((False, True), (True, False)):
@@ -234,6 +306,116 @@ class B200LifecycleTest(unittest.TestCase):
                 if owner.poll() is None:
                     owner.kill()
                     owner.communicate(timeout=3)
+
+    def test_detached_launcher_preserves_overrides_and_enforces_full_strict_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            launcher = repo / "launch_b200.sh"
+            launcher.write_text(DETACHED_SCRIPT.read_text())
+            configured_root = root / "configured-root"
+            configured_root.mkdir()
+            env_file = root / "b200.env"
+            env_file.write_text(
+                f"export B200_ROOT={shlex.quote(str(configured_root))}\n"
+                "export VARIANT=stale MAX_STEPS=9 B200_ALLOW_PAUSE_KEEPALIVE=0\n"
+                "export B200_ALLOW_REDUCED_HOLMES=1 B200_ALLOW_DECODER_FILTERED=1\n"
+                "export B200_MEDIA_DECODE_TIMEOUT_SECONDS=600\n"
+                "export B200_MEDIA_CACHE_DIR=/stale-cache-must-not-replace-export\n"
+            )
+            names = (
+                "B200_ROOT", "B200_ENV_FILE", "B200_RUN_ROOT", "VARIANT", "MAX_STEPS",
+                "B200_ALLOW_PAUSE_KEEPALIVE", "B200_ALLOW_REDUCED_HOLMES",
+                "B200_ALLOW_DECODER_FILTERED", "B200_MEDIA_DECODE_TIMEOUT_SECONDS",
+                "B200_MEDIA_CACHE_DIR",
+            )
+            fake_full = "#!/usr/bin/env bash\nset -eu\n"
+            fake_full += "{\n" + "\n".join(
+                f'printf "%s=%s\\n" {name} "${{{name}}}"' for name in names
+            ) + '\n} > "$CAPTURE_FILE"\n'
+            (repo / "run_full_b200.sh").write_text(fake_full)
+            capture = root / "received-env"
+            explicit_cache = root / "explicit-cache"
+            env = {key: value for key, value in os.environ.items() if not key.startswith("B200_")}
+            env.update(
+                CAPTURE_FILE=str(capture), B200_ENV_FILE=str(env_file),
+                B200_MEDIA_DECODE_TIMEOUT_SECONDS="1234", B200_MEDIA_CACHE_DIR=str(explicit_cache),
+                VARIANT="baseline", MAX_STEPS="2", B200_ALLOW_PAUSE_KEEPALIVE="0",
+                B200_ALLOW_REDUCED_HOLMES="1", B200_ALLOW_DECODER_FILTERED="1",
+            )
+            result = subprocess.run(
+                ["bash", str(launcher), "ktr"], env=env, capture_output=True,
+                text=True, timeout=5, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            received = dict(line.split("=", 1) for line in capture.read_text().splitlines())
+            self.assertEqual(received["B200_ROOT"], str(configured_root))
+            self.assertEqual(received["B200_ENV_FILE"], str(env_file))
+            self.assertTrue(received["B200_RUN_ROOT"].startswith(str(configured_root / "artifacts/grpo-full-b200/ktr-")))
+            self.assertEqual(received["VARIANT"], "ktr")
+            self.assertEqual(received["MAX_STEPS"], "-1")
+            self.assertEqual(received["B200_ALLOW_PAUSE_KEEPALIVE"], "1")
+            self.assertEqual(received["B200_ALLOW_REDUCED_HOLMES"], "0")
+            self.assertEqual(received["B200_ALLOW_DECODER_FILTERED"], "0")
+            self.assertEqual(received["B200_MEDIA_DECODE_TIMEOUT_SECONDS"], "1234")
+            self.assertEqual(received["B200_MEDIA_CACHE_DIR"], str(explicit_cache))
+            exit_files = list((configured_root / "artifacts/launches").glob("ktr-*.exit"))
+            self.assertEqual(len(exit_files), 1)
+            self.assertEqual(exit_files[0].read_text().strip(), "0")
+
+    def test_viewer_interrupt_or_hangup_leaves_detached_job_running(self) -> None:
+        for interrupt in (signal.SIGINT, signal.SIGHUP):
+            with self.subTest(signal=interrupt), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repo = root / "repo"
+                repo.mkdir()
+                launcher = repo / "launch_b200.sh"
+                launcher.write_text(DETACHED_SCRIPT.read_text())
+                (repo / "run_full_b200.sh").write_text(
+                    '#!/usr/bin/env bash\nset -eu\n'
+                    'ps -o sid= -p "$$" > "$TEST_ROOT/job-session"\n'
+                    'printf started > "$TEST_ROOT/started"\n'
+                    'sleep 0.8\n'
+                    'printf complete > "$TEST_ROOT/complete"\n'
+                )
+                env = {key: value for key, value in os.environ.items() if not key.startswith("B200_")}
+                env.update(TEST_ROOT=str(root), B200_ROOT=str(root), B200_ENV_FILE=str(root / "absent.env"))
+                viewer = subprocess.Popen(
+                    ["bash", str(launcher), "baseline"], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                )
+                job_session: int | None = None
+                try:
+                    deadline = time.monotonic() + 3
+                    while not (root / "started").exists() and viewer.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue((root / "started").exists(), "detached mock job did not start")
+                    job_session = int((root / "job-session").read_text().strip())
+                    self.assertNotEqual(job_session, viewer.pid, "training mock was not detached")
+                    os.killpg(viewer.pid, interrupt)
+                    stdout, stderr = viewer.communicate(timeout=2)
+                    self.assertEqual(viewer.returncode, 0, stderr.decode())
+                    self.assertIn(b"Ctrl-C closes this viewer", stdout)
+                    deadline = time.monotonic() + 3
+                    exit_files: list[Path] = []
+                    while time.monotonic() < deadline:
+                        exit_files = list((root / "artifacts/launches").glob("baseline-*.exit"))
+                        if (root / "complete").exists() and exit_files:
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual((root / "complete").read_text(), "complete")
+                    self.assertEqual(len(exit_files), 1)
+                    self.assertEqual(exit_files[0].read_text().strip(), "0")
+                finally:
+                    if viewer.poll() is None:
+                        os.killpg(viewer.pid, signal.SIGKILL)
+                        viewer.communicate(timeout=2)
+                    if job_session is not None:
+                        try:
+                            os.killpg(job_session, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
 
 if __name__ == "__main__":

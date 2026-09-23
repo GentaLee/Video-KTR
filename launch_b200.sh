@@ -23,6 +23,7 @@ mkdir -p "${launch_dir}"
 launch_log="${launch_dir}/${variant}-${stamp}.log"
 exit_file="${launch_dir}/${variant}-${stamp}.exit"
 run_root="${b200_root}/artifacts/grpo-full-b200/${variant}-${stamp}"
+touch "${launch_log}"
 
 nohup setsid env B200_ROOT="${b200_root}" B200_ENV_FILE="${env_file}" \
     B200_RUN_ROOT="${run_root}" VARIANT="${variant}" MAX_STEPS=-1 \
