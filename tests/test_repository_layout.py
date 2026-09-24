@@ -9,6 +9,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryLayoutTests(unittest.TestCase):
+    def test_legacy_scripts_are_archived_and_tracked_despite_txt_ignore(self):
+        tracked = set(subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines())
+        for name in ("run_full_h200.sh.txt", "setup_grpo_env.sh.txt", "setup_upstream.sh.txt", "somke.sh.txt"):
+            relative = "docs/archive/scripts/" + name
+            self.assertTrue((ROOT / relative).is_file())
+            self.assertIn(relative, tracked)
+
     def test_current_document_links_exist(self):
         files = [ROOT / "README.md", ROOT / "describe.md", ROOT / "handoff/STATUS.md"]
         files += list((ROOT / "docs").glob("*.md"))

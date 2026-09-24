@@ -36,7 +36,7 @@ During training, non-critical tokens are masked, and gradients are reinforced on
 
 ### 📊 Main Results
 
-- On **Video-Holmes**, Video-KTR reaches **42.7**, **nearly matching closed-source models** such as GPT-4o (**42.0**) and Gemini-2.5-Pro (**45.0**) 🎯.  
+- On **Video-Holmes**, Video-KTR reaches **42.7**, **nearly matching closed-source models** such as GPT-4o (**42.0**) and Gemini-2.5-Pro (**45.0**) 🎯.
 - At the 7B scale, it also **substantially outperforms all existing open-source baselines**, highlighting the effectiveness of our key-token reinforcement approach.
 
 <div align="center">
@@ -44,7 +44,7 @@ During training, non-critical tokens are masked, and gradients are reinforced on
 </div>
 
 
-### ⚖️ Data Ablation on Different 
+### ⚖️ Data Ablation on Different
 
 Results from applying multiple post-training methods on the same dataset show that our approach consistently delivers superior performance.
 
@@ -67,7 +67,7 @@ Qualitatively, our word-cloud and POS analyses further confirm that masked token
   <img src="images/tokens.png" width="90%">
 </div>
 
-### 🎬 Case Studies on Event Causality Reasoning & Temporal Ordering 
+### 🎬 Case Studies on Event Causality Reasoning & Temporal Ordering
 
 <div align="center">
   <img src="images/demo_case_1.png" width="90%">
@@ -86,7 +86,7 @@ Qualitatively, our word-cloud and POS analyses further confirm that masked token
 git clone https://github.com/ziyue1999/Video-KTR.git
 cd Video-KTR
 
-conda create -n video-r1 python=3.11 
+conda create -n video-r1 python=3.11
 conda activate video-r1
 bash setup.sh
 
@@ -198,12 +198,12 @@ python ./src/inference_example.py
 If you find our work helpful for your research, please consider citing our work.
 ```bash
 @misc{wang2026videoktrreinforcingvideoreasoning,
-      title={Video-KTR: Reinforcing Video Reasoning via Key Token Attribution}, 
+      title={Video-KTR: Reinforcing Video Reasoning via Key Token Attribution},
       author={Ziyue Wang and Sheng Jin and Zhongrong Zuo and Jiawei Wu and Han Qiu and Qi She and Hao Zhang and Xudong Jiang},
       year={2026},
       eprint={2601.19686},
       archivePrefix={arXiv},
       primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2601.19686}, 
+      url={https://arxiv.org/abs/2601.19686},
 }
 ```
