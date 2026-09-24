@@ -1,0 +1,57 @@
+captured_at_utc=2026-09-23T05:42:38Z
+git_head=8a2e3cb48a34b7a4a8b9d975efe73d2d8dca0b61
+git_branch=zhaoye/video-ktr-h200
+git_status_short_begin
+ M .gitignore
+ M DEVELOPMENT_PLAN.md
+ M README.md
+ M REMOTE_COLLAB_HANDOFF.md
+ M describe.md
+ M handoff/STATUS.md
+ M run_full.sh
+?? CONVERSATION_HISTORY.md
+?? H200_ALIGNED_RUN.md
+?? h200_keepalive.sh
+?? launch_h200.sh
+?? run_baseline.sh
+?? run_full_h200_aligned.sh
+?? run_ktr.sh
+?? setup_h200_aligned_env.sh
+?? smoke_h200_aligned.sh
+?? src/grpo_validate_h200.py
+?? src/h200_keepalive_ctl.py
+?? tests/test_grpo_validate_h200.py
+?? tests/test_h200_keepalive_ctl.py
+?? tests/test_run_full_h200_aligned.py
+?? tests/test_run_full_keepalive.py
+git_status_short_end
+source_sha256[run_full_h200_aligned.sh]=2a96957b640c6ecbe8ca9a6e0e6839bcf8ec10b8771032d89d8308a13e206527
+source_sha256[src/grpo_validate_h200.py]=259fac81b92e2d2a2ec1527da07e123821082f6ea22b9f21f33b1d8f4f72b1b3
+source_sha256[src/grpo_validate_b200_dataset.py]=53110301278ee326ab75b77449a9e4f035ed01c80d97686337297594828c2f25
+source_sha256[h200_keepalive.sh]=259a9804ba91b413b228bffde0d3c51fee30305097c7d5d5e64d9e729cb5b7cb
+source_sha256[src/h200_keepalive_ctl.py]=467d759041ac00f550477ce7b0bcf1fefdd89c58b197159ba17177bdd46b1d0d
+source_sha256[src/grpo_write_model_sha256_manifest.py]=bae12012fb1c4713bd9ff0a08219ecff5f231580c711d4508ab2edcbfc3d0431
+source_sha256[src/grpo_prepare_dataset.py]=7f998ef4b5f2e88847cfbb0a13e75b8b5c1fd8a502fe2c0365afbbff66e04c4b
+source_sha256[src/grpo_verify_media_decode.py]=294b5826c4f52c624d95f6a2817f7bba686ec9533ff3f999ae2e515ba1e4e289
+source_sha256[src/grpo_media_cache.py]=1c0eebaa66918459e328c54f97942959322c6b6fb71596c31f48cd31d8b5fdb9
+source_sha256[src/grpo_media_prefetch.py]=60175c4de9d2e8399208f3e2c7e4464214b2a7835cd7c25ac44b6e781c22f303
+source_sha256[src/qwen-vl-utils/src/qwen_vl_utils/vision_process.py]=c194cd56b952fc6dd94bab8739367158a0b4118bc5363cf2710ecf942ce9b504
+source_sha256[src/r1-v/src/open_r1/grpo.py]=2aa31a6970dd2e6a4a44984404fe8cf0d3c3322229f202c68ffe6eabac32d9b6
+source_sha256[src/r1-v/src/open_r1/trainer/grpo_trainer.py]=a88cb2edb8ab918418c26db35dfdd53915d2f2b38492067bc4bbb25a5ce392e9
+source_sha256[src/r1-v/src/open_r1/trainer/qwen25vl_fa2_compat.py]=bf723fe5e4d644740777f2cf716de494ffaf027821caf724435dc7835f209ebe
+source_sha256[src/r1-v/src/open_r1/trainer/video_ktr_grpo_trainer.py]=7a795013b45601778ec2398f1e6a0fee2bf6c48e47c62413dbe7e77ffb3226d1
+source_sha256[src/r1-v/src/open_r1/trainer/ktr_token_utils.py]=34937b8ab0de50a2ce8963bfcb053f55d1355ea200e530478c1b4cd9e0f3cd2e
+model_integrity_manifest=<CLUSTER_2_ROOT>/Video-KTR/manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json
+model_integrity_manifest_sha256=8843b41fb6fb183a57f60ef3c72fb98f46ebc932def62a4660025da6af097800
+[2026-09-23 13:42:40,716] [INFO] [real_accelerator.py:219:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+python_runtime=3.12.3
+torch=2.10.0+cu128
+cuda=12.8
+torchvision=0.25.0+cu128
+av=14.2.0
+deepspeed=0.15.4
+flash_attn=2.8.3
+transformers=4.49.0.dev0
+tokenizers=0.21.4
+trl=0.16.0
+triton=3.6.0

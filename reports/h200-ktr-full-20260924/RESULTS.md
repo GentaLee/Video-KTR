@@ -4,8 +4,10 @@
 
 对外交接使用 `KT-HANDOFF/v1`：注明 profile、运行身份、证据时间、已验证事实、未验证事项、下一步及操作授权。区分历史运行源码与归档提交；不要用新分支的 HEAD 替代原运行版本。机器仅用集群编号，路径使用持久根占位符。
 
-PROFILE: h200  
-STATUS: KTR_COMPLETED  
+PROFILE: h200
+
+STATUS: KTR_COMPLETED
+
 RUN: ktr-20260923T054132Z-2458824
 
 ## 结论
