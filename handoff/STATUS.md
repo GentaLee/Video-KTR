@@ -8,7 +8,7 @@ LAST_VERIFIED_UTC: 2026-09-24T03:41:15Z
 
 本工作区只维护集群 3 / B200；联网开发分支为 `<owner>/video-ktr-b200`，与 H200 是独立 clone。运行集群的持久盘与开发端不同，Git 提交和 bundle 是交付边界，不存在共享目录自动更新。
 
-## 当前结果（覆盖下方原运行历史）
+## 当前结果
 
 - **最新操作**：用户随后启动`baseline-20260924T033709Z-424904`，本次按明确授权向已核对wrapper发送TERM；exit=130，torchrun进程退出，唯一保活恢复，日志保留。不是训练故障；尚无完成的正式baseline结果。等待用户从整理后的新release手动重新启动。
 - **目录整理**：当前文档`docs/`，历史`docs/archive/`，运行脚本`scripts/`，统一入口`bash run.sh baseline`。不移动数据、模型、checkpoint，不覆盖旧release，不改变训练关键源码。
@@ -18,18 +18,15 @@ LAST_VERIFIED_UTC: 2026-09-24T03:41:15Z
 - 新paired smoke `tail-fix-86317d0` 两者exit=0，保活恢复。43项相关测试通过（包含后续baseline快捷入口测试）。
 - 从原checkpoint-2100恢复，run=`ktr-20260924T031544Z-389593`，**15步完成到2115，exit=0**；最终4-shard模型与checkpoint-2115的8卡optimizer/model/RNG/scheduler状态保存成功。训练进程已退出，唯一保活恢复。
 - 恢复段外层502.566秒，峰值79,695MiB；原尝试52,760.078秒，峰值110,517MiB。前后窗口与重复计算不可混作完整成功epoch性能。
-- baseline正式训练未启动；使用同修复release的`run_baseline_b200.sh`，从原始SFT开始，明确清空resume。该快捷入口经stub环境测试，不伪称正式baseline已完成。
+- baseline尚无完成结果；后续使用`run.sh baseline`，从原始SFT开始，明确清空resume。入口经stub环境测试，不伪称正式baseline已完成。
 - 前次baseline交付release=`b532e4c41d1b25abb12a6bab9c233f923c2f8fcd`，其用户启动任务已主动停止。目录整理版通过新bundle交付，运行端`current`指向整理版repo；当前入口见[OPERATIONS.md](../docs/OPERATIONS.md)。旧release保持原样。
 - 完整结果与模型哈希：[RESULTS.md](../reports/b200-ktr-full-20260924/RESULTS.md)；故障/命令：[B200_CHECKPOINT_RECOVERY.md](../docs/B200_CHECKPOINT_RECOVERY.md)；踩坑：[B200_PITFALLS.md](../docs/B200_PITFALLS.md)。
 
-## 原运行历史
+## 配置与历史
 
-- run：`ktr-20260923T031639Z-2981461`，相对产物根 `artifacts/grpo-full-b200/`。
-- 当前运行源码冻结在 `d967c23`、历史分支 `<owner>/video-ktr-repro-handoff`；新开发分支不追认或修改该 run 的身份。
-- 配置：8×B200；Holmes-16k 全部 16,916 条（图像 8,765 / 视频 8,151）；16384/768/G8；FA2；8 帧；单次随机非恒等置换；per-completion top-20%、绝对 delta；每 100 步 checkpoint。
-- 全数据缓存 0 拒绝/超时；8 卡 paired smoke、两种 7-step 回归、最终保存及保活故障恢复均已通过，见 B200_PIPELINE_VALIDATION.md。
-- 最后检查：正式 KTR 152/2,115 步，训练日志及 GPU 运算持续推进；这不是实时进度。正式 baseline 尚未启动。
-- 请求 max_pixels=401408；Qwen 原有有效视频上限约 105369，不应宣称逐帧实际401408。
+8×B200、Holmes16916条、16384/768/G8、FA2、8帧、单次非恒等置换、per-completion top20%、绝对delta、checkpoint100。请求max_pixels401408，原Qwen有效视频cap约105369。历史过程集中在[归档](../docs/archive/README.md)，不将旧进度混入当前状态。
+
+目录整理增加5项目录/链接/入口/归档追踪检查，连同原43项及7项交接测试，共55项通过。训练核心源码与已通过paired smoke一致；此次整理未额外启动GPU冒烟或正式训练。
 
 ## 边界与下一步
 
