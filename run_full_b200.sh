@@ -20,7 +20,7 @@ env_file="${B200_ENV_FILE:-${b200_root}/b200.env}"
 explicit_b200_names=()
 explicit_b200_values=()
 for name in \
-    B200_ROOT B200_ENV_FILE B200_RUN_ROOT RUN_ROOT VARIANT MAX_STEPS PYTHON_BIN B200_MODEL_PATH B200_DATA_ROOT \
+    B200_ROOT B200_ENV_FILE B200_RUN_ROOT RUN_ROOT VARIANT MAX_STEPS PYTHON_BIN B200_MODEL_PATH B200_DATA_ROOT B200_RESUME_FROM_CHECKPOINT \
     B200_DATASET_SOURCE B200_KEEPALIVE_MAIN B200_KEEPALIVE_LAUNCHER \
     B200_ALLOW_PAUSE_KEEPALIVE B200_ALLOW_REDUCED_HOLMES \
     B200_ALLOW_DECODER_FILTERED B200_SMOKE_RUN_ROOT B200_ENV_MANIFEST \
@@ -954,6 +954,12 @@ if [[ "${allow_decoder_filtered}" == "1" ]]; then
 fi
 run_logged_preflight "mixed decoder data-class gate" "${data_gate_args[@]}"
 training_dataset_json="${decoder_dataset}"
+if [[ -n "${B200_RESUME_FROM_CHECKPOINT:-}" ]]; then
+    run_logged_preflight "checkpoint resume contract" \
+        "${python_bin}" -u "${project_root}/src/grpo_validate_b200_resume.py" \
+        --checkpoint "${B200_RESUME_FROM_CHECKPOINT}" --dataset "${training_dataset_json}" \
+        --variant "${variant}" --max-steps "${max_steps}" --output "${run_root}/resume_gate.json"
+fi
 reproduction_class="$("${python_bin}" - "${data_gate}" <<'PY'
 import json
 import sys
@@ -1143,6 +1149,10 @@ command=(
     --run_name "Video-KTR-B200-${variant}"
     --seed 42
 )
+if [[ -n "${B200_RESUME_FROM_CHECKPOINT:-}" ]]; then
+    command+=(--resume_from_checkpoint "${B200_RESUME_FROM_CHECKPOINT}")
+    log "restoring optimizer, scheduler, RNG and step from ${B200_RESUME_FROM_CHECKPOINT}; keeping original base/reference model"
+fi
 set +e
 B200_TRAINING_LOG="${run_root}/training.log" B200_PIPELINE_LOG="${run_root}/terminal.log" \
     setsid bash -c 'set -o pipefail; "$@" 2>&1 | tee -a "${B200_TRAINING_LOG}" >> "${B200_PIPELINE_LOG}"' bash "${command[@]}" &

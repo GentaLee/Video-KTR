@@ -862,7 +862,11 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _distributed_mean(self, values: torch.Tensor) -> float:
-        gathered = self.accelerator.gather_for_metrics(values.detach().float())
+        # These are completion-level training statistics, not dataset rows.
+        # gather_for_metrics trims the last batch by the prompt remainder,
+        # destroying G-completion groups. Include sampler padding consistently
+        # with the optimized training batch; do not claim unique-row metrics.
+        gathered = self.accelerator.gather(values.detach().float())
         return float(gathered.mean().item())
 
     def compute_loss(self, model: Any, inputs: list[dict[str, Any]], return_outputs: bool = False, num_items_in_batch: Any = None) -> torch.Tensor:
@@ -1140,7 +1144,7 @@ class VideoKTRGRPOTrainer(Qwen2VLGRPOTrainer):
             reward_value = self._distributed_mean(rewards_per_func[:, reward_index])
             self._metrics[f"rewards/{reward_name}"].append(reward_value)
             latest_step_metrics[f"rewards/{reward_name}"] = reward_value
-        gathered_rewards = self.accelerator.gather_for_metrics(rewards.detach())
+        gathered_rewards = self.accelerator.gather(rewards.detach())
         reward_groups = gathered_rewards.view(-1, self.num_generations)
         all_wrong = float((reward_groups <= 1).all(dim=1).float().mean().item())
         all_correct = float((reward_groups >= 2).all(dim=1).float().mean().item())
