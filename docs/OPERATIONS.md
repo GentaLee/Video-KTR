@@ -6,6 +6,10 @@
 
 运行端`<项目持久根>/current`是指向本次已验收release仓库的导航软链接。只在无训练运行时按显式交付切换；启动器解析真实路径，运行中不更换源码。可用`git -C <项目持久根>/current rev-parse HEAD`核对与开发/GitHub版本一致。
 
+## 当前结果
+
+2026-09-25整理：KTR与baseline均已完成2115步，模型保存成功、保活恢复，详见[结果索引](../reports/README.md)。下列命令用于明确授权的新训练，本轮无需重跑。报告更新不自动切换运行端current或冻结release。
+
 ## 正常操作
 
 进入已交付release的repo后：
@@ -15,11 +19,11 @@ bash run.sh --help
 bash run.sh baseline
 ```
 
-任意工作目录均可使用 `bash <项目持久根>/current/run.sh baseline`。这也是本次整理后的推荐命令。
+任意工作目录均可使用 `bash <项目持久根>/current/run.sh baseline`。这是需要新跑baseline时的入口，不是查看结果的命令。
 
 baseline强制清空KTR恢复参数、从原始SFT模型开始，完整Holmes/2115步。GPU运行前暂停已识别保活，结束/失败后确认GPU进程释放再恢复。终端持续显示进度；Ctrl-C仅关闭detached训练的查看器，不会停止正式训练。不要重复提交同一个任务；节点锁拒绝并发。
 
-`bash run.sh smoke`是双模式短验证；`bash run.sh ktr`用于明确授权的新KTR任务。本轮KTR已完成，无需重复。KTR显式恢复可用`B200_RESUME_FROM_CHECKPOINT=<完整checkpoint路径> bash run.sh ktr`，当前门禁仅支持同variant、相同数据及2115总步数的8卡完整epoch。
+`bash run.sh smoke`是双模式短验证；`bash run.sh ktr`用于明确授权的新KTR任务。本轮KTR和baseline均已完成，无需重复。KTR显式恢复可用`B200_RESUME_FROM_CHECKPOINT=<完整checkpoint路径> bash run.sh ktr`，当前门禁仅支持同variant、相同数据及2115总步数的8卡完整epoch。
 
 ## 脚本分层
 

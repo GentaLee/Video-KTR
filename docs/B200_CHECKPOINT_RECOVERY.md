@@ -2,6 +2,8 @@
 
 > 目录归档后，当前启动以 [OPERATIONS.md](OPERATIONS.md) 及仓库根`run.sh`为准。本页的86317d0/b532e4c命令记录恢复当时的固定release，不作为最新交付入口。
 
+2026-09-25补记：后续baseline完整2115步已通过，最终模型/checkpoint保存成功；[对比结果](../reports/b200-paired-20260925/COMPARISON.md)。下文交付和“未启动”状态均为当时历史，不代表当前状态。
+
 ## 故障与修复边界
 
 原 run `ktr-20260923T031639Z-2981461` 在 2114/2115 后、最后一次 `compute_loss` 的日志指标聚合处失败：`shape '[-1, 8]' is invalid for input of size 4`。不是缺媒体或 CUDA OOM。原外层训练耗时 52,760.078 秒；退出后保活已自动恢复。

@@ -1,13 +1,13 @@
 # B200 当前开发记录
 
-更新：2026-09-24。状态以 [handoff/STATUS.md](../handoff/STATUS.md) 为准；历史详细过程保留于 [旧开发记录](archive/DEVELOPMENT_PLAN_20260924.md)。
+更新：2026-09-25。状态以 [handoff/STATUS.md](../handoff/STATUS.md) 为准；历史详细过程保留于 [旧开发记录](archive/DEVELOPMENT_PLAN_20260924.md)。
 
 ## 已完成
 
 - 全量Holmes路径和媒体缓存验证16916/16916，无删样本；8×B200、16384/768/G8、FA2、8帧。
 - KTR按每completion精确top20%、绝对delta、单次非恒等时序置换、不同image/video id实现；full与baseline共用数据/运行流水线。
 - 末批completion指标误截断已修复；checkpoint-2100恢复15步至2115成功，模型、完整checkpoint、资源摘要保存，保活恢复。
-- [KTR结果](../reports/b200-ktr-full-20260924/RESULTS.md)与[踩坑索引](B200_PITFALLS.md)已整理。用户新启动的baseline已按要求停止，等待使用整理后的入口重新启动。
+- [KTR结果](../reports/b200-ktr-full-20260924/RESULTS.md)与[踩坑索引](B200_PITFALLS.md)已整理。baseline新run已完成2115步、最终保存与保活恢复；见[配对结果](../reports/b200-paired-20260925/COMPARISON.md)。旧主动停止run保留为历史，不混入正式结果。
 
 ## 数据搬运和“拌匀”方式
 
@@ -27,4 +27,4 @@
 
 ## 下一步
 
-用户`bash run.sh baseline`→完整2115步及保存/保活验收→两模型使用同一独立评测集比较效果与资源。baseline不加载KTR权重，不自动续KTR checkpoint。H200工作区、训练和分支不在本次操作范围。
+两组训练已完成；下一步在同一独立评测集比较效果，并补最终模型CoT的token示例。训练日志、模型、checkpoint原位保留，Git保存[结果索引与脱敏证据](../reports/README.md)。baseline不加载KTR权重，不自动续KTR checkpoint。H200工作区、训练和分支不在本次操作范围。

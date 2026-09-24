@@ -1,37 +1,36 @@
 # B200 状态（本分支唯一事实源）
 
 PROFILE: b200
-STATUS: KTR_COMPLETED_BASELINE_STOPPED_BY_USER
-LAST_VERIFIED_UTC: 2026-09-24T03:41:15Z
+STATUS: KTR_AND_BASELINE_COMPLETED_EVALUATION_PENDING
+REPORT_DATE: 2026-09-25
+LAST_VERIFIED_UTC: 2026-09-24T18:25:09Z
 
-## 工作区责任
+## 当前事实
 
-本工作区只维护集群 3 / B200；联网开发分支为 `<owner>/video-ktr-b200`，与 H200 是独立 clone。运行集群的持久盘与开发端不同，Git 提交和 bundle 是交付边界，不存在共享目录自动更新。
+集群3两组已完成，训练进程退出，唯一保活已恢复。本次仅只读核验运行与归档报告，未重启训练、评测或操作保活。报告日期采用工作区日期；LAST_VERIFIED来自运行端时钟，模型完成时间以各run的UTC记录为准。
 
-## 当前结果
+| 项目 | baseline | KTR |
+| --- | --- | --- |
+| 最终run | baseline-20260924T035051Z-450240 | ktr-20260924T031544Z-389593 |
+| 运行源码 | ff1a1d03407bdec6382b6715429881eea223aaac | 86317d00619a56507f66236caa01eba1ebb8b459 |
+| 完成时间UTC | 2026-09-24T17:45:36.180225Z | 2026-09-24T03:26:09.242377Z |
+| global_step / exit | 2115 / 0 | 2115 / 0 |
+| 训练段消耗 | 13.88小时 | 14.80小时，含原失败段与恢复重算 |
+| 单卡峰值 | 58.40GiB | 107.93GiB |
 
-- **最新操作**：用户随后启动`baseline-20260924T033709Z-424904`，本次按明确授权向已核对wrapper发送TERM；exit=130，torchrun进程退出，唯一保活恢复，日志保留。不是训练故障；尚无完成的正式baseline结果。等待用户从整理后的新release手动重新启动。
-- **目录整理**：当前文档`docs/`，历史`docs/archive/`，运行脚本`scripts/`，统一入口`bash run.sh baseline`。不移动数据、模型、checkpoint，不覆盖旧release，不改变训练关键源码。
+两者最终4-shard模型、完整checkpoint2115的8卡optimizer/model/RNG及scheduler结构通过；未对最终checkpoint做重新加载验收。KTR权重重新哈希与原记录一致，未被baseline覆盖。两者最后100步训练奖励接近，尚无独立质量评测结论。
 
-- 原任务在2114/2115后的末批completion指标聚合失败；不是缺数据/OOM。
-- 修复训练源码 `86317d00619a56507f66236caa01eba1ebb8b459`；新release不覆盖旧目录。KTR/baseline共享completion统计修复，训练loss和选择器不变。
-- 新paired smoke `tail-fix-86317d0` 两者exit=0，保活恢复。43项相关测试通过（包含后续baseline快捷入口测试）。
-- 从原checkpoint-2100恢复，run=`ktr-20260924T031544Z-389593`，**15步完成到2115，exit=0**；最终4-shard模型与checkpoint-2115的8卡optimizer/model/RNG/scheduler状态保存成功。训练进程已退出，唯一保活恢复。
-- 恢复段外层502.566秒，峰值79,695MiB；原尝试52,760.078秒，峰值110,517MiB。前后窗口与重复计算不可混作完整成功epoch性能。
-- baseline尚无完成结果；后续使用`run.sh baseline`，从原始SFT开始，明确清空resume。入口经stub环境测试，不伪称正式baseline已完成。
-- 前次baseline交付release=`b532e4c41d1b25abb12a6bab9c233f923c2f8fcd`，其用户启动任务已主动停止。目录整理版通过新bundle交付，运行端`current`指向整理版repo；当前入口见[OPERATIONS.md](../docs/OPERATIONS.md)。旧release保持原样。
-- 完整结果与模型哈希：[RESULTS.md](../reports/b200-ktr-full-20260924/RESULTS.md)；故障/命令：[B200_CHECKPOINT_RECOVERY.md](../docs/B200_CHECKPOINT_RECOVERY.md)；踩坑：[B200_PITFALLS.md](../docs/B200_PITFALLS.md)。
+## 对齐和历史边界
 
-## 配置与历史
+8×B200、16916条全量Holmes、16384/768/G8、FA2、8帧。sampler显式补4条形成16920位置/2115步，三次run数据SHA及sampler plan一致。请求像素401408、原Qwen有效视频cap约105369。KTR每completion top20%、绝对delta、单次非恒等置换，image/video ID区分；baseline所有有效completion tokens参与训练。
 
-8×B200、Holmes16916条、16384/768/G8、FA2、8帧、单次非恒等置换、per-completion top20%、绝对delta、checkpoint100。请求max_pixels401408，原Qwen有效视频cap约105369。历史过程集中在[归档](../docs/archive/README.md)，不将旧进度混入当前状态。
+KTR原run在2114后末批指标聚合失败；修复后从2100恢复15步，loss/selector不变。baseline从原始SFT开始，不续KTR。旧baseline-20260924T033709Z-424904是用户主动停止exit130，不是当前结果。
 
-目录整理增加5项目录/链接/入口/归档追踪检查，连同原43项及7项交接测试，共55项通过。训练核心源码与已通过paired smoke一致；此次整理未额外启动GPU冒烟或正式训练。
+## 归档与部署
 
-## 边界与下一步
+[归档索引](../reports/README.md) · [配对报告](../reports/b200-paired-20260925/COMPARISON.md) · [baseline报告](../reports/b200-baseline-full-20260925/RESULTS.md) · [KTR报告](../reports/b200-ktr-full-20260924/RESULTS.md)。
 
-原运行端 `repo/` 保持不动；新版本通过bundle放到全新`releases/<commit>/repo/`。baseline保持同一实验定义与修复关键源码，核对critical-source/smoke gate，不夹入无关算法改动。H200分支及训练未修改；其同类尾批风险需该分支负责者单独处理。
+只维护B200分支；H200未操作。源码和产物位于不同集群独立盘，不共享目录。本次报告更新不替换运行端current（仍为ff1a1d0）或任何冻结release；原始产物原位保留。报告提交不是新的训练源码身份。
 
-full 不保存全量逐 token CoT 明细；已有 smoke token_examples；完整模型效果待同一独立评测集比较。训练完成后回传脱敏摘要和哈希到开发端 `reports/<run-id>/`，本分支显式 push，H200 再导入状态快照。
-
-RECOVERY: KTR本轮已完成，无需重复启动。baseline由用户手动运行新版快捷入口，自动管理保活；发布版需有与路径匹配的environment-manifest.json。完整模型质量尚待baseline及共同独立评测，不能以训练reward代替评测。
+NEXT: 同一独立评测集比较SFT/baseline/KTR，并补最终模型CoT token示例；需要单独启动评测。本轮训练无需重复。
+RECOVERY: NONE，两个最终训练任务均完成。

@@ -1,6 +1,6 @@
 # Video-KTR · B200 工作区
 
-本分支只负责集群3/B200。**KTR完整2115步已完成；用户启动的baseline已按要求停止，待重新手动启动。** 实时事实以 [状态交接](handoff/STATUS.md) 为准。
+本分支只负责集群3/B200。**KTR与baseline均完成2115步，最终模型已保存；独立质量评测待进行。** 实时事实以 [状态交接](handoff/STATUS.md) 为准。
 
 ## 从这里开始
 
@@ -14,12 +14,14 @@
 | 两分支与跨盘协作 | [协作协议](docs/COLLABORATION.md) |
 | 原始需求与历史材料 | [需求](describe.md) · [历史归档](docs/archive/README.md) |
 
+配对结论见 [对比报告](reports/b200-paired-20260925/COMPARISON.md)，所有run见 [结果归档索引](reports/README.md)。
+
 ## 唯一日常入口
 
 在B200运行端已交付版本的仓库目录执行：
 
 ```bash
-bash run.sh baseline  # 正式baseline，新训练，自动保活
+bash run.sh baseline  # 仅明确需要重跑时使用；本轮baseline已完成
 # bash run.sh smoke   # 双模式冒烟，不是正式baseline
 # bash run.sh ktr     # 仅明确需要重新跑KTR时使用；本轮KTR已完成
 ```
