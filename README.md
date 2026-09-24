@@ -1,5 +1,35 @@
 # 🦈 Video-KTR: Key-Token Reinforcement for Video Reasoning
 
+## 本仓库复现分支与当前状态
+
+更新日期：2026-09-25。以下为本仓库的复现实验记录，与下方原论文结果分开解读；训练完成不等于已复现论文评测成绩。
+
+### 为什么使用 `multimodal-ktr` 命名
+
+本次 Holmes 训练数据包含 **8,765 条图像样本和 8,151 条视频样本**，共 16,916 条，因此实验分支由 `video-ktr` 改为 `multimodal-ktr`，避免被理解为仅包含视频。`ktr` 表示复现项目范围，分支内同时维护 KTR 与 GRPO baseline；`h200` / `b200` 区分硬件、环境和运行记录。原项目名称 **Video-KTR**、论文名称、已有目录和冻结的运行源码身份不变。
+
+### 长期分支与进展
+
+| 分支 | 职责 | 已提交的最新状态 | 后续工作 |
+| --- | --- | --- | --- |
+| [`main`](https://github.com/GentaLee/Video-KTR/tree/main) | 上游基准与公共导航 | 保留原项目介绍；不混入两套实验运行代码 | 通过独立 PR 更新公共文档 |
+| [`GentaLee-patch-1`](https://github.com/GentaLee/Video-KTR/tree/GentaLee-patch-1) | 原作者补充需求、复现起点 | 保留需求说明及历史 | 作为参考，不承担日常实验开发 |
+| [`zhaoye/multimodal-ktr-h200`](https://github.com/GentaLee/Video-KTR/tree/zhaoye/multimodal-ktr-h200) | H200 实验与结果 | 已归档全量 KTR 2115/2115 步、exit=0、最终模型及 checkpoint；已提交记录尚无完整 baseline 结果 | 完成并归档配对 baseline、独立质量评测 |
+| [`zhaoye/multimodal-ktr-b200`](https://github.com/GentaLee/Video-KTR/tree/zhaoye/multimodal-ktr-b200) | B200 实验与结果 | KTR 与 baseline 均完成 2115/2115 步并保存；KTR 经 checkpoint2100 恢复完成，baseline 从 SFT 新训；训练结果对比已归档 | 使用同一独立评测集比较质量，补最终模型 CoT token 示例 |
+
+状态依据各分支已提交报告，不是实时进程监控。H200 使用 4 卡与梯度累积，B200 使用 8 卡；不能将跨硬件结果直接当作只改变 KTR 开关的严格对照。B200 最后 100 步训练奖励接近，尚不能据此判定 KTR 优于 baseline。
+
+- H200：[状态记录](https://github.com/GentaLee/Video-KTR/blob/zhaoye/multimodal-ktr-h200/handoff/STATUS.md) · [KTR 结果](https://github.com/GentaLee/Video-KTR/blob/zhaoye/multimodal-ktr-h200/reports/h200-ktr-full-20260924/RESULTS.md)
+- B200：[状态记录](https://github.com/GentaLee/Video-KTR/blob/zhaoye/multimodal-ktr-b200/handoff/STATUS.md) · [结果索引](https://github.com/GentaLee/Video-KTR/blob/zhaoye/multimodal-ktr-b200/reports/README.md) · [配对分析](https://github.com/GentaLee/Video-KTR/blob/zhaoye/multimodal-ktr-b200/reports/b200-paired-20260925/COMPARISON.md)
+
+### 旧分支的去向与协作约定
+
+旧 `zhaoye/video-ktr-h200` 和 `archive-20260924/video-ktr-h200` 已统一到新的 H200 分支，包含归档节点 `8fbaa46` 及全部祖先提交；旧 B200 分支已改名。拆分前的 `zhaoye/video-ktr-repro-handoff` 分支名已删除，其历史仍由两条实验分支保留，没有删除模型、数据或 checkpoint。
+
+H200 / B200 各维护一条长期实验分支，仅交换经审阅的修复和脱敏交接记录，不为同步文档整支合并。公共 README 改动从 `main` 建立临时文档分支、通过 PR 合入，合并后删除该临时分支；不删除两条长期实验分支。原始日志、模型、数据和私有环境文件不上 Git。
+
+---
+
 > **Video-KTR** is a reinforcement learning framework designed for complex video reasoning.\
 > It identifies and amplifies *critical visual--temporal tokens* via selective gradient reinforcement, significantly improving video reasoning performance.
 
