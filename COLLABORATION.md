@@ -4,12 +4,12 @@
 
 | 对象 | 源码位置（相对各自持久根） | 开发分支 | 职责 |
 | --- | --- | --- | --- |
-| 集群 1/2 的 H200 工作区 | `Video-KTR/` | `<owner>/video-ktr-h200` | H200 配置、实验及报告 |
-| 集群 1 的 B200 控制工作区 | `video-ktr-b200/repo/` | `<owner>/video-ktr-b200` | B200 开发、联网 Git 操作、发布准备 |
+| 集群 1/2 的 H200 工作区 | `Video-KTR/` | `<owner>/multimodal-ktr-h200` | H200 配置、实验及报告 |
+| 集群 1 的 B200 控制工作区 | `video-ktr-b200/repo/` | `<owner>/multimodal-ktr-b200` | B200 开发、联网 Git 操作、发布准备 |
 | 集群 3 的 B200 运行工作区 | `video-ktr-b200/repo/`（当前运行旧目录） | 当前 run 的冻结记录 | 当前训练期间不更新 |
 | 集群 3 的后续 B200 release | `video-ktr-b200/releases/<commit>/repo/` | 发布时的 B200 分支/commit | 以后从新目录启动，不覆盖旧 run |
 
-前两个工作区是独立 clone，不共享 Git index / HEAD。集群 1 与 H200 GPU 共享持久盘；B200 运行盘独立，必须显式传输。当前旧分支 `<owner>/video-ktr-repro-handoff` 保留作历史，不再作为两边共同开发入口。
+前两个工作区是独立 clone，不共享 Git index / HEAD。集群 1 与 H200 GPU 共享持久盘；B200 运行盘独立，必须显式传输。旧 handoff 分支名已退役，其提交由两条实验分支保留。H200 新分支继承归档节点 `8fbaa46`，包含原主分支 `8a2e3cb` 的全部历史。只改开发分支名，不改项目路径、冻结release或运行身份。
 
 ## 文档的唯一责任人
 
@@ -26,7 +26,7 @@
 ```bash
 # 在自己的开发 checkout；将占位符替换为实际对方分支
 git fetch origin
-python3 tools/sync_handoff.py origin/<owner>/video-ktr-<peer>
+python3 tools/sync_handoff.py origin/<owner>/multimodal-ktr-<peer>
 git diff -- handoff/peers/
 # 首次生成时文件未跟踪，还需直接打开检查其内容
 git add handoff/peers/<peer>.md

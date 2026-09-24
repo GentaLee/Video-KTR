@@ -2,7 +2,7 @@
 
 Read `.experiment-role`, `COLLABORATION.md`, and `handoff/STATUS.md` before project work.
 
-- This checkout owns only the profile in `.experiment-role`. Its development branch must end with `/video-ktr-<profile>`.
+- This checkout owns only the profile in `.experiment-role`. Its development branch must end with `/multimodal-ktr-<profile>`.
 - The H200 and B200 checkouts have independent Git directories. Do not use the other checkout as a scratch directory.
 - Never checkout, pull, merge, reset, deploy over, or change training sources in an active training directory. Creating a branch at the identical commit is metadata-only; still verify existing changes are preserved.
 - Record runtime provenance separately from the current documentation/development HEAD. A new branch or documentation commit does not relabel an already running experiment.
