@@ -1,5 +1,18 @@
 # Video-KTR：E/V/T token 归因与 Direct-GRPO 验证记录
 
+> 2026-09-24 最新 B200 恢复记录：[B200_CHECKPOINT_RECOVERY.md](B200_CHECKPOINT_RECOVERY.md)。末批 completion 指标截断修复、checkpoint-2100 续跑、新 release 环境清单与 baseline 入口以该文档及 [handoff/STATUS.md](handoff/STATUS.md) 为准；下方为历史记录。
+
+## 2026-09-24：当前完成状态与数据处理说明
+
+- KTR从checkpoint-2100续跑15步，完成2115/2115，退出0；最终模型/完整训练状态已保存，保活已恢复。正式baseline尚未启动。结果见 [结果MD](reports/b200-ktr-full-20260924/RESULTS.md)，故障索引见 [踩坑MD](B200_PITFALLS.md)。
+- **数据搬运**：集群1准备媒体、通过显式传输补全到集群3独立盘；不是共享文件夹。原始标注保持不变，用路径门禁和完整媒体/缓存门禁核验16916条；本次续跑没有重新传输或改动媒体。源码通过bundle+SHA进入独立release，不把数据/模型写入Git。
+- **混合模态如何“拌匀”**：sampler先按image/video分组，各组用seed42+epoch确定性打乱；同模态组成全局8-prompt block，再打乱block顺序。这样全epoch混合模态，但同一步8卡只处理同一种模态，避免图像/视频分支引发ZeRO collective错序。不是任意逐行shuffle，也不是先训全部图像再训视频。
+- **显式补齐而非掩盖缺失**：image8765补3、video8151补1，形成16920个采样位置/2115步。4个重复项及其原始索引写入modality_sampler_plan.jsonl；不drop_last、不过滤数据、不伪称16920个独立样本。恢复前后plan一致。
+- **CPU/GPU衔接**：首次精确解码生成缓存，后续全量热缓存校验；训练每rank2个CPU worker预取，GPU只消费已验证缓存。CPU准备保活开启，训练前停保活，结束/失败释放GPU后恢复；热缓存缩短前置串行段，不声称冷缓存校验与正式训练完全并行。
+- **本次修复**：completion指标不用会按prompt数截断的gather_for_metrics；KTR和baseline共用gather修复。训练loss与token筛选不变，统计包含上述补齐项。恢复入口核对variant/数据哈希/8卡分片，原base/reference不变。
+- **脚本职责**：`somke-b200.sh`双模式冒烟；`run_full_b200.sh`门禁/恢复/保活/训练；`launch_b200.sh`detached启动及终端实时日志；`run_baseline_b200.sh`自动解析release配置并清空resume参数，供用户启动正式baseline。
+- **下一步**：用户从已交付新版release启动baseline→2115步及保存/保活验收→同一独立评测集比较两模型。不得将训练reward、单步smoke性能或恢复段虚高吞吐当最终效果结论。
+
 > 2026-09-23 集群 3 更新：解码超时修复、精确缓存与 CPU/GPU 重叠、自动保活和新的两条启动命令，见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)。该记录覆盖下面较早的 B200 启动流程。
 
 更新日期：2026-09-22

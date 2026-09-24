@@ -1,5 +1,7 @@
 # Video-KTR 远程协作交接、环境与复现记录
 
+> 2026-09-24 集群 3 更新：[B200_CHECKPOINT_RECOVERY.md](B200_CHECKPOINT_RECOVERY.md) 及 [handoff/STATUS.md](handoff/STATUS.md) 是尾批修复与恢复的最新事实源。普通聊天使用自然语言，正式跨端交接保留下述结构化格式（按 COLLABORATION.md）。
+
 > 最新集群 3 交接（2026-09-23）：[B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md) 记录本轮故障证据、缓存/预取验证和自动保活启动入口；其状态记录覆盖第 10 节的旧运行状态。
 
 > 适用范围：本文件是远程同事与 AI 助手共同使用的单一交接入口。

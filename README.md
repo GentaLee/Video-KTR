@@ -2,7 +2,7 @@
 
 > 本工作区专用于 **B200**。先读 [本分支状态](handoff/STATUS.md) 和 [跨存储盘交付协议](COLLABORATION.md)；不要从这里修改 H200 工作区或覆盖正在运行的 B200 release。
 
-> 本分支的集群 3 启动与最新流水线验证见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)：精确媒体缓存、CPU 预取、自动保活，以及 `bash launch_b200.sh ktr` / `baseline` 两个串行训练入口。
+> 2026-09-24：B200 KTR 已从checkpoint恢复并完成2115步，正式baseline待用户启动。先读 [结果](reports/b200-ktr-full-20260924/RESULTS.md)、[恢复/新版启动命令](B200_CHECKPOINT_RECOVERY.md)、[踩坑索引](B200_PITFALLS.md)。新版入口为已交付release中的 `run_baseline_b200.sh`，自动保活，不要沿用旧目录入口。
 
 > **Video-KTR** is a reinforcement learning framework designed for complex video reasoning.\
 > It identifies and amplifies *critical visual--temporal tokens* via selective gradient reinforcement, significantly improving video reasoning performance.

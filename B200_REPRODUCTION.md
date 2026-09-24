@@ -1,5 +1,7 @@
 # Video-KTR：集群 3 B200 复现交付
 
+> **2026-09-24：KTR完整2115步已完成，checkpoint恢复与最终保存通过。** 最新 [结果报告](reports/b200-ktr-full-20260924/RESULTS.md)、[恢复与baseline命令](B200_CHECKPOINT_RECOVERY.md)、[踩坑索引](B200_PITFALLS.md)、[状态](handoff/STATUS.md) 覆盖下方历史状态与命令。
+
 > **2026-09-23 更新：**当前启动入口、缓存/预取流水线及验证结果见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)。本文保留此前环境、参数对齐与故障的历史证据；下面的旧运行状态及启动命令不作为最新操作指引。
 
 > 远程协作消息必须先遵守 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md) 第 0 节的 `KT-HANDOFF/v1` 格式。本文只记录可复查事实；未运行的 full 不写成已完成。
