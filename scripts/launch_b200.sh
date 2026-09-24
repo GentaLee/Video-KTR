@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Detached strict training with a disposable terminal log viewer.
 set -Eeuo pipefail
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 variant="${1:-}"
 if [[ "$#" != 1 || ( "${variant}" != ktr && "${variant}" != baseline ) ]]; then
     printf 'Usage: bash launch_b200.sh ktr|baseline\n' >&2
@@ -29,7 +29,7 @@ nohup setsid env B200_ROOT="${b200_root}" B200_ENV_FILE="${env_file}" \
     B200_RUN_ROOT="${run_root}" VARIANT="${variant}" MAX_STEPS=-1 \
     B200_ALLOW_PAUSE_KEEPALIVE=1 B200_ALLOW_REDUCED_HOLMES=0 B200_ALLOW_DECODER_FILTERED=0 \
     bash -c 'set +e; bash "$1"; result=$?; printf "%s\n" "$result" > "$2"; exit "$result"' \
-    bash "${project_root}/run_full_b200.sh" "${exit_file}" \
+    bash "${project_root}/scripts/run_full_b200.sh" "${exit_file}" \
     > "${launch_log}" 2>&1 < /dev/null &
 job_pid="$!"
 printf 'Submitted %s (launcher PID %s). Keep-alive is managed automatically.\nRun: %s\nLog: %s\nCtrl-C closes this viewer; the training continues.\n' \

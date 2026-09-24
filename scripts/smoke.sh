@@ -8,7 +8,7 @@
 
 set -Eeuo pipefail
 
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 output_root="${OUTPUT_ROOT:-${project_root}/artifacts/grpo-smoke}"
 run_root="${RUN_ROOT:-${output_root}/${timestamp}}"
@@ -315,7 +315,7 @@ write_source_provenance() {
             printf 'git_repository=unavailable\n'
         fi
         for source_path in \
-            "${project_root}/smoke.sh" \
+            "${project_root}/scripts/smoke.sh" \
             "${project_root}/src/grpo_prepare_dataset.py" \
             "${project_root}/src/grpo_media_cache.py" \
             "${project_root}/src/grpo_media_prefetch.py" \

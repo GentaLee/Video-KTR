@@ -1,6 +1,6 @@
 # Experiment workspace rules
 
-Read `.experiment-role`, `COLLABORATION.md`, and `handoff/STATUS.md` before project work.
+Read `.experiment-role`, `docs/COLLABORATION.md`, and `handoff/STATUS.md` before project work.
 
 - This checkout owns only the profile in `.experiment-role`. Its development branch must end with `/video-ktr-<profile>`.
 - The H200 and B200 checkouts have independent Git directories. Do not use the other checkout as a scratch directory.

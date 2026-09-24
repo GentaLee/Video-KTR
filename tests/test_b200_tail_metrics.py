@@ -46,7 +46,7 @@ class TailMetricsTests(unittest.TestCase):
         self.assertEqual(namespace["_distributed_mean"](trainer, values), 31.5)
 
     def test_wrapper_forwards_resume_without_replacing_base_model(self):
-        script = (ROOT / "run_full_b200.sh").read_text()
+        script = (ROOT / "scripts/run_full_b200.sh").read_text()
         self.assertIn('command+=(--resume_from_checkpoint "${B200_RESUME_FROM_CHECKPOINT}")', script)
         self.assertIn('--model_name_or_path "${model_path}"', script)
         self.assertIn('"checkpoint resume contract"', script)

@@ -1,10 +1,10 @@
 # Video-KTR：E/V/T token 归因与 Direct-GRPO 验证记录
 
-> 2026-09-24 最新 B200 恢复记录：[B200_CHECKPOINT_RECOVERY.md](B200_CHECKPOINT_RECOVERY.md)。末批 completion 指标截断修复、checkpoint-2100 续跑、新 release 环境清单与 baseline 入口以该文档及 [handoff/STATUS.md](handoff/STATUS.md) 为准；下方为历史记录。
+> 2026-09-24 最新 B200 恢复记录：[B200_CHECKPOINT_RECOVERY.md](../B200_CHECKPOINT_RECOVERY.md)。末批 completion 指标截断修复、checkpoint-2100 续跑、新 release 环境清单与 baseline 入口以该文档及 [handoff/STATUS.md](../../handoff/STATUS.md) 为准；下方为历史记录。
 
 ## 2026-09-24：当前完成状态与数据处理说明
 
-- KTR从checkpoint-2100续跑15步，完成2115/2115，退出0；最终模型/完整训练状态已保存，保活已恢复。正式baseline尚未启动。结果见 [结果MD](reports/b200-ktr-full-20260924/RESULTS.md)，故障索引见 [踩坑MD](B200_PITFALLS.md)。
+- KTR从checkpoint-2100续跑15步，完成2115/2115，退出0；最终模型/完整训练状态已保存，保活已恢复。正式baseline尚未启动。结果见 [结果MD](../../reports/b200-ktr-full-20260924/RESULTS.md)，故障索引见 [踩坑MD](../B200_PITFALLS.md)。
 - **数据搬运**：集群1准备媒体、通过显式传输补全到集群3独立盘；不是共享文件夹。原始标注保持不变，用路径门禁和完整媒体/缓存门禁核验16916条；本次续跑没有重新传输或改动媒体。源码通过bundle+SHA进入独立release，不把数据/模型写入Git。
 - **混合模态如何“拌匀”**：sampler先按image/video分组，各组用seed42+epoch确定性打乱；同模态组成全局8-prompt block，再打乱block顺序。这样全epoch混合模态，但同一步8卡只处理同一种模态，避免图像/视频分支引发ZeRO collective错序。不是任意逐行shuffle，也不是先训全部图像再训视频。
 - **显式补齐而非掩盖缺失**：image8765补3、video8151补1，形成16920个采样位置/2115步。4个重复项及其原始索引写入modality_sampler_plan.jsonl；不drop_last、不过滤数据、不伪称16920个独立样本。恢复前后plan一致。

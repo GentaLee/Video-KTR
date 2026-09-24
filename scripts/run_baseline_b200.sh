@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fresh baseline on the validated B200 release; never resume a KTR checkpoint.
 set -Eeuo pipefail
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_root="$(dirname "${project_root}")"
 if [[ "$(basename "$(dirname "${release_root}")")" == releases ]]; then
     default_root="$(dirname "$(dirname "${release_root}")")"
@@ -20,4 +20,4 @@ export B200_SMOKE_RUN_ROOT="${B200_SMOKE_RUN_ROOT:-${B200_ROOT}/artifacts/grpo-s
 # run_full preserves this explicit empty value over any private env setting.
 export B200_RESUME_FROM_CHECKPOINT=
 printf 'Fresh B200 baseline; checkpoint resume disabled. Source: %s\n' "${project_root}"
-exec bash "${project_root}/launch_b200.sh" baseline
+exec bash "${project_root}/scripts/launch_b200.sh" baseline

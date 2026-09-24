@@ -1,6 +1,8 @@
 # 集群 3 / B200 踩坑与修复索引
 
-更新：2026-09-24 UTC。当前训练结果见 [结果报告](reports/b200-ktr-full-20260924/RESULTS.md)；旧故障细节见 [流水线验证](B200_PIPELINE_VALIDATION.md)。
+更新：2026-09-24 UTC。当前训练结果见 [结果报告](../reports/b200-ktr-full-20260924/RESULTS.md)；旧故障细节见 [流水线验证](archive/B200_PIPELINE_VALIDATION.md)。
+
+目录整理后入口统一为仓库根`run.sh`，其余`.sh`在`scripts/`；旧H200/通用安装脚本以`.sh.txt`存于`docs/archive/scripts/`，不能当B200入口。54项相关检查通过（原43项+4项目录/链接/路由+7项交接同步）。用户baseline的exit130为主动停止，不计为新故障。
 
 | 坑 | 证据/原因 | 已采用办法与边界 |
 | --- | --- | --- |

@@ -9,7 +9,7 @@
 
 set -Eeuo pipefail
 
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 b200_root="${B200_ROOT:-$(cd "${project_root}/.." && pwd)}"
 b200_root="$(realpath -m "${b200_root}")"
 env_file="${B200_ENV_FILE:-${b200_root}/b200.env}"
@@ -403,7 +403,7 @@ write_source_provenance() {
         git -C "${project_root}" status --short
         printf 'git_status_short_end\n'
         for source_path in \
-            "${project_root}/run_full_b200.sh" \
+            "${project_root}/scripts/run_full_b200.sh" \
             "${project_root}/src/grpo_validate_b200_smoke.py" \
             "${project_root}/src/grpo_validate_b200_dataset.py" \
             "${project_root}/src/grpo_validate_b200_runtime.py" \

@@ -13,9 +13,9 @@
 
 ## 文档的唯一责任人
 
-- [handoff/STATUS.md](handoff/STATUS.md)：本分支唯一事实源，负责者更新配置、run、证据、问题、下一步。
+- [handoff/STATUS.md](../handoff/STATUS.md)：本分支唯一事实源，负责者更新配置、run、证据、问题、下一步。
 - `handoff/peers/<另一profile>.md`：对方已提交状态的只读快照，记录来源 commit 和内容 SHA256；不是实时监控。
-- `describe.md`、`DEVELOPMENT_PLAN.md`、`REMOTE_COLLAB_HANDOFF.md` 属于各自分支，不互相整篇覆盖；历史内容与 STATUS 冲突时，先核查 STATUS 的时间和运行证据。
+- `describe.md`、`docs/DEVELOPMENT.md`及`docs/archive/`的历史记录属于各自分支，不互相整篇覆盖；历史内容与 STATUS 冲突时，先核查 STATUS 的时间和运行证据。
 - 跨分支共同修复按 commit 单独审阅/cherry-pick，再做目标 profile 的 smoke。不能为同步文档而 merge 整条实验分支。
 - 聊天可自然交流；发给远程同事的正式交接记录按已有 `KT-HANDOFF/v1` 格式，附 profile、源码身份、run 和证据时间。
 
@@ -61,7 +61,7 @@ clone 只准备源码，不切换现有运行入口。使用 release 前必须�
 
 ```bash
 B200_ROOT=<B200_ROOT> B200_ENV_FILE=<B200_ROOT>/b200.env \
-  bash <B200_ROOT>/releases/<commit>/repo/launch_b200.sh ktr
+  bash <B200_ROOT>/releases/<commit>/repo/run.sh ktr
 ```
 
 baseline 同理替换最后一个参数。不要将 `b200.env`、venv、模型、数据或缓存放入源码 bundle。版本目录采用“发布后不编辑”的协作约定，不是文件系统强制只读。

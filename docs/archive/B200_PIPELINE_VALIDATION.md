@@ -1,6 +1,6 @@
 # 集群 3：B200 数据流水线故障、修复与验证
 
-> 最新补充（2026-09-24）：完整 epoch 末批统计故障和 checkpoint 恢复见 [B200_CHECKPOINT_RECOVERY.md](B200_CHECKPOINT_RECOVERY.md)，当前状态见 [handoff/STATUS.md](handoff/STATUS.md)。下面为历史验收，baseline 应使用新恢复报告中的 release 命令。
+> 最新补充（2026-09-24）：完整 epoch 末批统计故障和 checkpoint 恢复见 [B200_CHECKPOINT_RECOVERY.md](../B200_CHECKPOINT_RECOVERY.md)，当前状态见 [handoff/STATUS.md](../../handoff/STATUS.md)。下面为历史验收，baseline 应使用新恢复报告中的 release 命令。
 
 更新日期：2026-09-23（UTC）。环境一律匿名为“集群 3”，项目根目录写作 `<共享持久卷>/video-ktr-b200`；本文不记录真实账号、主机名、IP、认证材料或私有路径。
 

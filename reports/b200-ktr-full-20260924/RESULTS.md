@@ -65,6 +65,6 @@ sampler 分模态组全局 block 后打乱 block 顺序；固定 seed42，epoch0
 
 ## 下一步
 
-由用户手动启动同修复源码的baseline，全量2115步，从相同原始SFT模型开始，不加载KTR状态；使用相同数据与采样器。入口见 [恢复与命令](../../B200_CHECKPOINT_RECOVERY.md)。结束后同一独立评测集评测两个最终模型，再比较质量、资源和token示例。
+由用户手动启动同修复源码的baseline，全量2115步，从相同原始SFT模型开始，不加载KTR状态；使用相同数据与采样器。入口见 [恢复与命令](../../docs/B200_CHECKPOINT_RECOVERY.md)。结束后同一独立评测集评测两个最终模型，再比较质量、资源和token示例。
 
 full未保存全量CoT逐token记录；已有paired smoke token_examples可作功能示例，不能当成最终训练模型的CoT分析。数据、模型、完整日志不上传GitHub；本报告只上传脱敏摘要和哈希。

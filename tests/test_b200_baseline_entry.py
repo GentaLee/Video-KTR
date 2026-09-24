@@ -12,10 +12,10 @@ class BaselineEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             release = root / "releases/commit"
-            repo = release / "repo"
+            repo = release / "repo/scripts"
             repo.mkdir(parents=True)
             (release / "environment-manifest.json").write_text("{}")
-            (repo / "run_baseline_b200.sh").write_bytes((ROOT / "run_baseline_b200.sh").read_bytes())
+            (repo / "run_baseline_b200.sh").write_bytes((ROOT / "scripts/run_baseline_b200.sh").read_bytes())
             (repo / "launch_b200.sh").write_text(
                 'printf "%s\\n" "$1" "$B200_ROOT" "$B200_ENV_MANIFEST" '
                 '"resume=<$B200_RESUME_FROM_CHECKPOINT>" "$B200_SMOKE_RUN_ROOT"\n')

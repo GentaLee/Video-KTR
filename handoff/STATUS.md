@@ -1,8 +1,8 @@
 # B200 状态（本分支唯一事实源）
 
 PROFILE: b200
-STATUS: KTR_COMPLETED_BASELINE_READY
-LAST_VERIFIED_UTC: 2026-09-24T03:28:00Z
+STATUS: KTR_COMPLETED_BASELINE_STOPPED_BY_USER
+LAST_VERIFIED_UTC: 2026-09-24T03:41:15Z
 
 ## 工作区责任
 
@@ -10,14 +10,17 @@ LAST_VERIFIED_UTC: 2026-09-24T03:28:00Z
 
 ## 当前结果（覆盖下方原运行历史）
 
+- **最新操作**：用户随后启动`baseline-20260924T033709Z-424904`，本次按明确授权向已核对wrapper发送TERM；exit=130，torchrun进程退出，唯一保活恢复，日志保留。不是训练故障；尚无完成的正式baseline结果。等待用户从整理后的新release手动重新启动。
+- **目录整理**：当前文档`docs/`，历史`docs/archive/`，运行脚本`scripts/`，统一入口`bash run.sh baseline`。不移动数据、模型、checkpoint，不覆盖旧release，不改变训练关键源码。
+
 - 原任务在2114/2115后的末批completion指标聚合失败；不是缺数据/OOM。
 - 修复训练源码 `86317d00619a56507f66236caa01eba1ebb8b459`；新release不覆盖旧目录。KTR/baseline共享completion统计修复，训练loss和选择器不变。
 - 新paired smoke `tail-fix-86317d0` 两者exit=0，保活恢复。43项相关测试通过（包含后续baseline快捷入口测试）。
 - 从原checkpoint-2100恢复，run=`ktr-20260924T031544Z-389593`，**15步完成到2115，exit=0**；最终4-shard模型与checkpoint-2115的8卡optimizer/model/RNG/scheduler状态保存成功。训练进程已退出，唯一保活恢复。
 - 恢复段外层502.566秒，峰值79,695MiB；原尝试52,760.078秒，峰值110,517MiB。前后窗口与重复计算不可混作完整成功epoch性能。
 - baseline正式训练未启动；使用同修复release的`run_baseline_b200.sh`，从原始SFT开始，明确清空resume。该快捷入口经stub环境测试，不伪称正式baseline已完成。
-- baseline交付release=`b532e4c41d1b25abb12a6bab9c233f923c2f8fcd`；独立environment manifest已生成，smoke/critical-source gate PASS，运行端Git干净。后续文档commit不改变固定运行release。
-- 完整结果与模型哈希：[RESULTS.md](../reports/b200-ktr-full-20260924/RESULTS.md)；故障/命令：[B200_CHECKPOINT_RECOVERY.md](../B200_CHECKPOINT_RECOVERY.md)；踩坑：[B200_PITFALLS.md](../B200_PITFALLS.md)。
+- 前次baseline交付release=`b532e4c41d1b25abb12a6bab9c233f923c2f8fcd`，其用户启动任务已主动停止。目录整理版通过新bundle交付，运行端`current`指向整理版repo；当前入口见[OPERATIONS.md](../docs/OPERATIONS.md)。旧release保持原样。
+- 完整结果与模型哈希：[RESULTS.md](../reports/b200-ktr-full-20260924/RESULTS.md)；故障/命令：[B200_CHECKPOINT_RECOVERY.md](../docs/B200_CHECKPOINT_RECOVERY.md)；踩坑：[B200_PITFALLS.md](../docs/B200_PITFALLS.md)。
 
 ## 原运行历史
 

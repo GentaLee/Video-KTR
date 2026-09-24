@@ -9,7 +9,7 @@
 
 set -Eeuo pipefail
 
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 b200_root="${B200_ROOT:-$(cd "${project_root}/.." && pwd)}"
 env_file="${B200_ENV_FILE:-${b200_root}/b200.env}"
 
@@ -532,8 +532,8 @@ log "FlashAttention-2 binary contains an sm_100 marker: ${flash_binary}"
     printf 'triton_cuda_include_dir=%s\ntriton_ptxas_path=%s\ntriton_cache_dir=%s\ntriton_tmpdir=%s\n' "${triton_cuda_include_dir}" "${triton_ptxas_path}" "${triton_cache_dir}" "${triton_tmpdir}"
     printf 'image_video_token_ids=distinct\nvideo_reader_backend=torchvision\nsmoke_problem_ids=%s\n' "${smoke_problem_ids}"
     printf 'media_preprocessing=exact-cache-v1\ndataloader_workers=2\ndataloader_prefetch_factor=2\n'
-    printf 'wrapper_sha256=%s\n' "$(sha256sum "${project_root}/somke-b200.sh" | awk '{print $1}')"
-    printf 'delegate_sha256=%s\n' "$(sha256sum "${project_root}/smoke.sh" | awk '{print $1}')"
+    printf 'wrapper_sha256=%s\n' "$(sha256sum "${project_root}/scripts/somke-b200.sh" | awk '{print $1}')"
+    printf 'delegate_sha256=%s\n' "$(sha256sum "${project_root}/scripts/smoke.sh" | awk '{print $1}')"
 } > "${run_root}/b200_profile.txt"
 
 log "phase 3/7: validating the known keep-alive before pausing it"
@@ -633,7 +633,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-COLL}"
 set +e
-setsid "${project_root}/smoke.sh" &
+setsid bash "${project_root}/scripts/smoke.sh" &
 delegated_pid="$!"
 for ((isolation_attempt = 0; isolation_attempt < 30; isolation_attempt += 1)); do
     delegated_pgid="$(ps -o pgid= -p "${delegated_pid}" 2>/dev/null | tr -d '[:space:]' || true)"

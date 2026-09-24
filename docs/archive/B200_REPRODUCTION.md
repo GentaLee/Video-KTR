@@ -1,6 +1,6 @@
 # Video-KTR：集群 3 B200 复现交付
 
-> **2026-09-24：KTR完整2115步已完成，checkpoint恢复与最终保存通过。** 最新 [结果报告](reports/b200-ktr-full-20260924/RESULTS.md)、[恢复与baseline命令](B200_CHECKPOINT_RECOVERY.md)、[踩坑索引](B200_PITFALLS.md)、[状态](handoff/STATUS.md) 覆盖下方历史状态与命令。
+> **2026-09-24：KTR完整2115步已完成，checkpoint恢复与最终保存通过。** 最新 [结果报告](../../reports/b200-ktr-full-20260924/RESULTS.md)、[恢复与baseline命令](../B200_CHECKPOINT_RECOVERY.md)、[踩坑索引](../B200_PITFALLS.md)、[状态](../../handoff/STATUS.md) 覆盖下方历史状态与命令。
 
 > **2026-09-23 更新：**当前启动入口、缓存/预取流水线及验证结果见 [B200_PIPELINE_VALIDATION.md](B200_PIPELINE_VALIDATION.md)。本文保留此前环境、参数对齐与故障的历史证据；下面的旧运行状态及启动命令不作为最新操作指引。
 
@@ -8,7 +8,7 @@
 
 ## 此前结论（截至 2026-09-22）
 
-集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。首次 strict KTR full wrapper 在 CPU 媒体预检中因两条 120 秒超时而 exit=1，未进入 `torchrun` / GPU full epoch；保活保持运行。修复后的 full 仍仅由操作者手动运行 [run_full_b200.sh](run_full_b200.sh)。
+集群 3 的最终 8×B200 paired smoke 已通过：baseline 与 KTR 各完成一次真实生成、前向、反向和优化，FA2、Qwen rotary 兼容、E/V/T/union、资源遥测以及保活恢复均有 artifact 证据。首次 strict KTR full wrapper 在 CPU 媒体预检中因两条 120 秒超时而 exit=1，未进入 `torchrun` / GPU full epoch；保活保持运行。修复后的 full 仍仅由操作者手动运行 [run_full_b200.sh](../../scripts/run_full_b200.sh)。
 
 | 项目 | B200 实现 / 已验证值 | 对齐状态 |
 | --- | --- | --- |
@@ -24,7 +24,7 @@
 
 上游命令本身可见 [原始 launcher](https://github.com/zywang0104/Video-KTR/blob/main/src/scripts/run_grpo_video_ktr.sh)：8 ranks、16k prompt、768 completion、G=8、`max_pixels=401408` 与 FA2。当前实现新增的是可审计的数据/保活门禁、mixed-modality sampler、严格 attention gate 和选择器语义修正，不是把 H200 配置直接搬到 B200。
 
-full 的默认信任锚是随代码审阅、按精确 revision 固定的 [模型完整性 manifest](manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json)，而不是可变的本机输出。runtime gate 必须对本地 checkpoint 的全部顶层常规文件重新计算 SHA-256 并与该 JSON 对比，通过后才可进入 GPU 阶段，并应落盘 `runtime_gate.json`。`grpo_write_model_sha256_manifest.py` 生成的本地 verified-copy 仅可用于独立比较或恢复诊断，不能替代默认锚。2026-09-22 的 CPU-only 实测已通过 19 文件、4 shard 校验，且未暂停保活、未启动 full；full 自身仍会在开始与占卡前各复验一次。
+full 的默认信任锚是随代码审阅、按精确 revision 固定的 [模型完整性 manifest](../../manifests/video-r1-qwen25vl-7b-cot-sft-f71f0f1e22c015007fccd080eef87824fe292a10.json)，而不是可变的本机输出。runtime gate 必须对本地 checkpoint 的全部顶层常规文件重新计算 SHA-256 并与该 JSON 对比，通过后才可进入 GPU 阶段，并应落盘 `runtime_gate.json`。`grpo_write_model_sha256_manifest.py` 生成的本地 verified-copy 仅可用于独立比较或恢复诊断，不能替代默认锚。2026-09-22 的 CPU-only 实测已通过 19 文件、4 shard 校验，且未暂停保活、未启动 full；full 自身仍会在开始与占卡前各复验一次。
 
 ## 已通过的最终 smoke
 

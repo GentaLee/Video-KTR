@@ -2,7 +2,7 @@
 
 > 当前运行状态以 [handoff/STATUS.md](handoff/STATUS.md) 为准；下文的旧 smoke 和故障进度保留为历史记录，不代表当前训练尚未启动。
 
-本文是当前可执行验证的简要快照。跨机器协作时，以 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md) 的固定对话格式、证据位置和交接规则为准；其中的历史 H200 记录不代表当前 B200 结论。
+本文是当前可执行验证的简要快照。跨机器协作时，以 [REMOTE_COLLAB_HANDOFF.md](docs/archive/REMOTE_COLLAB_HANDOFF.md) 的固定对话格式、证据位置和交接规则为准；其中的历史 H200 记录不代表当前 B200 结论。
 
 ```text
 图像 / 视频 + 问题
@@ -76,4 +76,4 @@ KTR token report 共保存 768 个 union token，均位于 CoT：`E=341`、`V=59
 
 ## 下一步
 
-`somke-b200.sh` 已成功完成最终 smoke；首次 strict full 的 120 秒媒体门禁失败，尚无 B200 `torchrun` / GPU full epoch。修复后的启动脚本会在终端显示并记录 600 秒预检上限；操作者须以新 run root 重试 strict KTR，并在其成功后串行启动采用相同设置的 baseline。每次 full 会在训练期间暂停已核验的保活，且无论成功、失败或中断都会确认训练进程退出后恢复保活。环境契约、FA2 兼容处理、数据门禁与证据索引见 [REMOTE_COLLAB_HANDOFF.md](REMOTE_COLLAB_HANDOFF.md)。
+`somke-b200.sh` 已成功完成最终 smoke；首次 strict full 的 120 秒媒体门禁失败，尚无 B200 `torchrun` / GPU full epoch。修复后的启动脚本会在终端显示并记录 600 秒预检上限；操作者须以新 run root 重试 strict KTR，并在其成功后串行启动采用相同设置的 baseline。每次 full 会在训练期间暂停已核验的保活，且无论成功、失败或中断都会确认训练进程退出后恢复保活。环境契约、FA2 兼容处理、数据门禁与证据索引见 [REMOTE_COLLAB_HANDOFF.md](docs/archive/REMOTE_COLLAB_HANDOFF.md)。

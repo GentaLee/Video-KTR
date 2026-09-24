@@ -180,7 +180,7 @@ class B200RuntimeGateTests(unittest.TestCase):
     def test_full_gate_locks_exact_b200_runtime_and_rechecks_before_gpu_pause(self) -> None:
         self.assertEqual(validator.EXPECTED_RUNTIME["python"], "3.12.3")
         self.assertEqual(validator.EXPECTED_RUNTIME["deepspeed"], "0.15.4")
-        launcher = (ROOT / "run_full_b200.sh").read_text(encoding="utf-8")
+        launcher = (ROOT / "scripts/run_full_b200.sh").read_text(encoding="utf-8")
         self.assertIn(PINNED_MANIFEST.name, launcher)
         self.assertIn("B200 smoke provenance recheck before GPU pause", launcher)
         self.assertIn("B200 model/environment recheck before GPU pause", launcher)

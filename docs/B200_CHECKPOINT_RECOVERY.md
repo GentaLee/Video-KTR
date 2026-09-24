@@ -1,5 +1,7 @@
 # 集群 3：B200 尾批故障与 checkpoint 恢复
 
+> 目录归档后，当前启动以 [OPERATIONS.md](OPERATIONS.md) 及仓库根`run.sh`为准。本页的86317d0/b532e4c命令记录恢复当时的固定release，不作为最新交付入口。
+
 ## 故障与修复边界
 
 原 run `ktr-20260923T031639Z-2981461` 在 2114/2115 后、最后一次 `compute_loss` 的日志指标聚合处失败：`shape '[-1, 8]' is invalid for input of size 4`。不是缺媒体或 CUDA OOM。原外层训练耗时 52,760.078 秒；退出后保活已自动恢复。
@@ -26,7 +28,7 @@ Holmes 有 16,916 条，混合模态 sampler 显式补齐 4 条后输出 16,920 
 - 新 paired smoke 两者均 exit=0；baseline 外层 119.209 秒、峰值 47,859 MiB；KTR 外层 120.346 秒、峰值 56,269 MiB。仅为单步功能/容量验证，不是正式训练性能结论。
 - 首次 release 续跑 `ktr-20260924T031422Z-386968` 在 GPU 工作前被环境门禁拒绝：旧 manifest 的 `repo_root` 仍指向旧目录。重新执行已有 `setup_b200_env.sh` 的只读导入/版本/来源校验和 manifest 生成段，为 release 创建独立 `environment-manifest.json`；未重装包、未修改旧 manifest 或 venv `.pth`。新源路径通过显式 `PYTHONPATH` 验证，运行命令显式设置 `B200_ENV_MANIFEST`。
 - 正式恢复 run：`ktr-20260924T031544Z-389593`；checkpoint 门禁、全量缓存 16,916/16,916、19 个模型文件及 4 个权重 shard 的哈希复核通过。
-- **完成：2100→2115，恰好15步，exit=0；最终模型和checkpoint-2115已保存，唯一保活已恢复。** 详细资源/数值/权重哈希见 [结果报告](reports/b200-ktr-full-20260924/RESULTS.md)。新增baseline快捷入口测试后，相关测试共43项通过。
+- **完成：2100→2115，恰好15步，exit=0；最终模型和checkpoint-2115已保存，唯一保活已恢复。** 详细资源/数值/权重哈希见 [结果报告](../reports/b200-ktr-full-20260924/RESULTS.md)。新增baseline快捷入口测试后，相关测试共43项通过。
 
 ## baseline 启动原则
 

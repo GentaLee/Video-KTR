@@ -10,8 +10,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = (ROOT / "run_full_b200.sh").read_text(encoding="utf-8")
-SMOKE_LAUNCHER = (ROOT / "somke-b200.sh").read_text(encoding="utf-8")
+LAUNCHER = (ROOT / "scripts/run_full_b200.sh").read_text(encoding="utf-8")
+SMOKE_LAUNCHER = (ROOT / "scripts/somke-b200.sh").read_text(encoding="utf-8")
 
 
 class B200FullLauncherContractTests(unittest.TestCase):

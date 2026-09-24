@@ -13,7 +13,7 @@ import time
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "run_full_b200.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run_full_b200.sh"
 DETACHED_SCRIPT = SCRIPT.with_name("launch_b200.sh")
 
 
@@ -310,8 +310,8 @@ class B200LifecycleTest(unittest.TestCase):
     def test_detached_launcher_preserves_overrides_and_enforces_full_strict_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            repo = root / "repo"
-            repo.mkdir()
+            repo = root / "repo/scripts"
+            repo.mkdir(parents=True)
             launcher = repo / "launch_b200.sh"
             launcher.write_text(DETACHED_SCRIPT.read_text())
             configured_root = root / "configured-root"
@@ -368,8 +368,8 @@ class B200LifecycleTest(unittest.TestCase):
         for interrupt in (signal.SIGINT, signal.SIGHUP):
             with self.subTest(signal=interrupt), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                repo = root / "repo"
-                repo.mkdir()
+                repo = root / "repo/scripts"
+                repo.mkdir(parents=True)
                 launcher = repo / "launch_b200.sh"
                 launcher.write_text(DETACHED_SCRIPT.read_text())
                 (repo / "run_full_b200.sh").write_text(
