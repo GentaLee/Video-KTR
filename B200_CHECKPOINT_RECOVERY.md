@@ -34,6 +34,14 @@ Holmes 有 16,916 条，混合模态 sampler 显式补齐 4 条后输出 16,920 
 
 后续交付的快捷入口为 `bash <已交付release>/repo/run_baseline_b200.sh`：自动解析项目根、release环境清单与已通过smoke，强制清空KTR恢复参数，再调用同一full启动器。该快捷入口只整理部署参数，没有改变训练关键源码；full仍强制验收smoke源哈希。
 
+已交付并核验的baseline版本为 `b532e4c41d1b25abb12a6bab9c233f923c2f8fcd`，新环境manifest已生成，critical-source/smoke gate PASS；入口测试PASS，**没有启动正式baseline**。直接运行：
+
+```bash
+bash <项目持久根>/releases/b532e4c41d1b25abb12a6bab9c233f923c2f8fcd/repo/run_baseline_b200.sh
+```
+
+交付bundle SHA256：`002dd5f947c2e02d31e5a08ca3f816029fab6ff9b1af1cb8f65a11232774e3b2`。训练修复版本86317d0与交付版本b532e4c的所有critical training sources一致。后续纯文档提交不替换这一固定运行release。
+
 在集群 3 上执行（用实际持久根替换占位符）：
 
 ```bash
