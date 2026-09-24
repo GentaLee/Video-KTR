@@ -1,0 +1,42 @@
+{
+  "launch_config.txt": {
+    "sha256": "7b300a43835f522700a63775a95893b42f97465f2f975bc6f7c1505dcaa79d32",
+    "size_bytes": 2879
+  },
+  "source_provenance.txt": {
+    "sha256": "88e05c98eec2eed4d68c11920eef3c2b7404876839cd3583e6244a9f6d320ce9",
+    "size_bytes": 3085
+  },
+  "training_summary.json": {
+    "sha256": "46b758344cc1734b96818835d790cb2f1fd1aabd6ea72e41c7c6a678e8b4fc38",
+    "size_bytes": 2852
+  },
+  "runtime_gate.json": {
+    "sha256": "13cf365de658d18ebd1819ebc1e9513111fb51b2d73984e10c9808926f1ee04c",
+    "size_bytes": 14797
+  },
+  "data_gate.json": {
+    "sha256": "ca0da5c7064b7769e4f63a4a36fba15ad7851f9d86fd0381f5a69f408ed0b306",
+    "size_bytes": 1902
+  },
+  "smoke_gate.json": {
+    "sha256": "ba2fe1d431673345f3c6ce82ff5adc3bd005f003758866e3d85673c05bb4434d",
+    "size_bytes": 2524
+  },
+  "training.log": {
+    "sha256": "aff52e0b0a7e5f0c6a60aef8d736f471e97f6f23aacecb2eede83031bf64f988",
+    "size_bytes": 2028978
+  },
+  "training/training_complete.json": {
+    "sha256": "034e67bc95132aea912178718202b3a09d50f945be17474756f92d1a694e6ae2",
+    "size_bytes": 1203
+  },
+  "training/modality_sampler_plan.jsonl": {
+    "sha256": "6b38ea28fe93aa2d6056e9022a8d5bd70b778d491140c2507fc17a10c4d83dc7",
+    "size_bytes": 374
+  },
+  "training/checkpoint-2115/trainer_state.json": {
+    "sha256": "c40dfeaaf65394703d5722ac19c7c2d0ce37c860aae8f64d1a451f4288c17bed",
+    "size_bytes": 1379223
+  }
+}

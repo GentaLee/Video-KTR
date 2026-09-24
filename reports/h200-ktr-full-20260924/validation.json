@@ -1,0 +1,31 @@
+{
+  "run": "ktr-20260923T054132Z-2458824",
+  "exit_code": 0,
+  "global_step": 2115,
+  "loss_records": 2115,
+  "steps_contiguous": true,
+  "logged_numeric_metrics_finite": true,
+  "four_rank_checkpoint_files_present": true,
+  "checkpoint_restore_tested": false,
+  "final_checkpoint_log": {
+    "all_correct": 0.25,
+    "all_wrong": 0.0,
+    "completion_length": 356.90625,
+    "epoch": 1.0,
+    "grad_norm": 4.331096311035999,
+    "kl": 0.16060371696949005,
+    "ktr/entropy_tokens": 71.734375,
+    "ktr/temporal_tokens": 35.09375,
+    "ktr/union_tokens": 120.90625,
+    "ktr/update_ratio": 0.3394823968410492,
+    "ktr/visual_tokens": 71.734375,
+    "learning_rate": 0.0,
+    "loss": 0.0064,
+    "reward": 1.8928248882293701,
+    "reward_std": 0.3713699132204056,
+    "rewards/accuracy_reward": 0.7396998405456543,
+    "rewards/format_reward": 1.0,
+    "step": 2115
+  },
+  "final_model_index_tensor_count": 729
+}

@@ -1,0 +1,81 @@
+{
+  "created_at_utc": "2026-09-24T05:37:52.019260Z",
+  "variant": "ktr",
+  "exit_code": 0,
+  "succeeded": true,
+  "duration_seconds": 86065.144,
+  "resource_log": "<CLUSTER_2_ROOT>/Video-KTR/artifacts/h200-aligned-runtime/artifacts/grpo-full-h200/ktr-20260923T054132Z-2458824/gpu_metrics.jsonl",
+  "monitor_errors": [],
+  "gpus": {
+    "0": {
+      "samples": 16788,
+      "memory_used_mib_peak": 100745.0,
+      "memory_used_mib_mean": 99681.06730998332,
+      "gpu_utilization_pct_peak": 100.0,
+      "gpu_utilization_pct_mean": 47.76882296878723,
+      "power_draw_w_peak": 709.3,
+      "power_draw_w_mean": 300.5762294496069
+    },
+    "1": {
+      "samples": 16788,
+      "memory_used_mib_peak": 96001.0,
+      "memory_used_mib_mean": 94820.88867047892,
+      "gpu_utilization_pct_peak": 100.0,
+      "gpu_utilization_pct_mean": 48.86341434357875,
+      "power_draw_w_peak": 707.88,
+      "power_draw_w_mean": 296.70873540624257
+    },
+    "2": {
+      "samples": 16788,
+      "memory_used_mib_peak": 108473.0,
+      "memory_used_mib_mean": 106698.46878722898,
+      "gpu_utilization_pct_peak": 100.0,
+      "gpu_utilization_pct_mean": 52.862937812723374,
+      "power_draw_w_peak": 706.53,
+      "power_draw_w_mean": 300.22630152489876
+    },
+    "3": {
+      "samples": 16788,
+      "memory_used_mib_peak": 111489.0,
+      "memory_used_mib_mean": 104746.21997855611,
+      "gpu_utilization_pct_peak": 100.0,
+      "gpu_utilization_pct_mean": 52.12657850845842,
+      "power_draw_w_peak": 708.22,
+      "power_draw_w_mean": 312.4874833214201
+    }
+  },
+  "training_complete": {
+    "completed_at_utc": "2026-09-24T05:37:27.247017Z",
+    "global_step": 2115,
+    "train_metrics": {
+      "train_runtime": 86002.1368,
+      "train_samples_per_second": 0.197,
+      "train_steps_per_second": 0.025,
+      "total_flos": 0.0,
+      "train_loss": 0.005958747757303179
+    },
+    "latest_step_metrics": {
+      "completion_length": 349.0625,
+      "rewards/accuracy_reward": 0.6875,
+      "rewards/format_reward": 1.0,
+      "all_wrong": 0.0,
+      "all_correct": 0.25,
+      "reward": 1.8250000476837158,
+      "reward_std": 0.40020376443862915,
+      "kl": 0.17263244092464447,
+      "ktr/entropy_tokens": 70.1875,
+      "ktr/visual_tokens": 70.1875,
+      "ktr/temporal_tokens": 70.1875,
+      "ktr/union_tokens": 127.59375,
+      "ktr/update_ratio": 0.3655937910079956
+    },
+    "video_ktr": true,
+    "selection_mode": "paper",
+    "selection_scope": "per_completion",
+    "temporal_permutations": 1,
+    "skip_final_model_save": false,
+    "dataset_name": "<CLUSTER_2_ROOT>/Video-KTR/artifacts/h200-aligned-runtime/artifacts/grpo-full-h200/ktr-20260923T054132Z-2458824/Holmes-16k-media-decoder-verified.json",
+    "data_root": "<CLUSTER_2_ROOT>/Video-R1-data",
+    "model_name_or_path": "<CLUSTER_2_ROOT>/models/Video-R1/Qwen2.5-VL-7B-COT-SFT"
+  }
+}

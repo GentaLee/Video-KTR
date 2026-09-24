@@ -1,0 +1,21 @@
+{
+  "run": "ktr-20260923T054132Z-2458824",
+  "files": {
+    "model-00001-of-00004.safetensors": {
+      "sha256": "b4743fe2a9d8fc50d9085d2cbde6ac2cee3e7d558a5b4e5f51d39fdb158f2fb4",
+      "size_bytes": 4968243304
+    },
+    "model-00002-of-00004.safetensors": {
+      "sha256": "c805bb23458f9e0770be3fed6b7123eb429359e3de63e33586ce17d4ee66e41f",
+      "size_bytes": 4991495816
+    },
+    "model-00003-of-00004.safetensors": {
+      "sha256": "6bda88800f5506716f3214e4b58061da27f9bfe48ef0daa9d61e4c4bc950a014",
+      "size_bytes": 4932751040
+    },
+    "model-00004-of-00004.safetensors": {
+      "sha256": "97036da50c6fcdfe31de34b7a0718efa6bc67a7b1cfaa45502b9356faaabc3f6",
+      "size_bytes": 1691924384
+    }
+  }
+}
