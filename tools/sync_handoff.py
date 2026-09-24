@@ -20,7 +20,7 @@ def synchronize(root, ref, check=False):
     if role not in ROLES:
         raise ValueError("invalid local experiment role")
     branch = git(root, "symbolic-ref", "--short", "HEAD").decode().strip()
-    if not branch.endswith("/video-ktr-" + role):
+    if not branch.endswith("/multimodal-ktr-" + role):
         raise ValueError("development branch does not match local experiment role")
     tip = git(root, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}").decode().strip()
     peer = git(root, "show", tip + ":.experiment-role").decode().strip()
